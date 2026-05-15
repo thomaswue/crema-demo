@@ -12,7 +12,9 @@ runtime and its packages preserved for runtime-loaded application classes.
 ## Requirements
 
 - macOS on Apple Silicon
-- GraalVM JDK 25 available through `JAVA_HOME`
+- GraalVM JDK 25.1 with public-member metadata preservation support available
+  through `JAVA_HOME`; this demo was tested with Oracle GraalVM
+  `25.1.0-dev+10.1`
 - `native-image` available at `$JAVA_HOME/bin/native-image`
 - Maven
 
