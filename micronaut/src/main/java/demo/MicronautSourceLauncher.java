@@ -9,6 +9,18 @@ import io.micronaut.context.ApplicationContext;
 import io.micronaut.context.ApplicationContextBuilder;
 import io.micronaut.core.io.service.DynamicServiceLoaderBridge;
 import io.micronaut.runtime.server.EmbeddedServer;
+import org.junit.jupiter.engine.JupiterTestEngine;
+import org.junit.platform.engine.TestExecutionResult;
+import org.junit.platform.engine.discovery.DiscoverySelectors;
+import org.junit.platform.launcher.Launcher;
+import org.junit.platform.launcher.LauncherDiscoveryRequest;
+import org.junit.platform.launcher.TestExecutionListener;
+import org.junit.platform.launcher.TestIdentifier;
+import org.junit.platform.launcher.core.LauncherConfig;
+import org.junit.platform.launcher.core.LauncherDiscoveryRequestBuilder;
+import org.junit.platform.launcher.core.LauncherFactory;
+import org.junit.platform.launcher.listeners.SummaryGeneratingListener;
+import org.junit.platform.launcher.listeners.TestExecutionSummary;
 
 import javax.annotation.processing.Processor;
 import javax.tools.Diagnostic;
@@ -55,6 +67,9 @@ public final class MicronautSourceLauncher {
     private static final Pattern PACKAGE_DECLARATION = Pattern.compile(
             "(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;"
     );
+    private static final Pattern TOP_LEVEL_CLASS_DECLARATION = Pattern.compile(
+            "(?m)^\\s*(?:public\\s+)?(?:final\\s+|abstract\\s+|sealed\\s+|non-sealed\\s+)*class\\s+([A-Za-z_$][\\w$]*)\\b"
+    );
 
     private MicronautSourceLauncher() {
     }
@@ -65,10 +80,12 @@ public final class MicronautSourceLauncher {
 
         LaunchOptions options = LaunchOptions.parse(args);
         List<Path> sourceFiles = collectSourceFiles(options.sourcePaths());
+        List<Path> testSourceFiles = options.test() ? collectSourceFiles(options.testSourcePaths()) : List.of();
         List<String> annotationPatterns = annotationPatterns(sourceFiles, options.annotationPatterns());
 
         Path workDir = Files.createTempDirectory("micronaut-source-launcher-");
         Path classesDir = Files.createDirectories(workDir.resolve("classes"));
+        List<Path> testSupportSourceFiles = options.test() ? writeTestSupportSources(workDir) : List.of();
         StartupTimings timings = new StartupTimings(options.timings());
         timings.record("setup", processStartNanos);
 
@@ -78,7 +95,7 @@ public final class MicronautSourceLauncher {
         timings.record(launcherClasspath.extracted() ? "extract launcher libs" : "index launcher libs", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
         try {
-            compile(sourceFiles, classesDir, launcherClasspath, annotationPatterns);
+            compileApplicationAndTests(sourceFiles, testSourceFiles, testSupportSourceFiles, classesDir, launcherClasspath, annotationPatterns);
         } catch (RuntimeException | IOException e) {
             if (launcherClasspath.extracted()) {
                 throw e;
@@ -87,18 +104,29 @@ public final class MicronautSourceLauncher {
             long fallbackStartNanos = System.nanoTime();
             LauncherClasspath extractedClasspath = extractedLauncherClasspath(workDir);
             timings.record("fallback extract launcher libs", fallbackStartNanos);
-            compile(sourceFiles, classesDir, extractedClasspath, annotationPatterns);
+            compileApplicationAndTests(sourceFiles, testSourceFiles, testSupportSourceFiles, classesDir, extractedClasspath, annotationPatterns);
             launcherClasspath = extractedClasspath;
         }
         timings.record("javac and annotation processing", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
-        EmbeddedServer server = startServer(classesDir, options.port(), options.properties(), timings);
+        StartedServer startedServer = startServer(classesDir, options.port(), options.properties(), timings);
         timings.record("server setup total", phaseStartNanos);
         long elapsedMillis = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
 
         timings.print();
+        EmbeddedServer server = startedServer.server();
         System.out.println("Micronaut source launcher started " + server.getURL() + " in " + elapsedMillis + " ms");
-        Runtime.getRuntime().addShutdownHook(new Thread(server::stop, "micronaut-shutdown"));
+        if (options.test()) {
+            int failures = 1;
+            try {
+                failures = runTests(testSourceFiles, startedServer);
+            } finally {
+                startedServer.close();
+            }
+            System.exit(failures > 0 ? 1 : 0);
+            return;
+        }
+        Runtime.getRuntime().addShutdownHook(new Thread(startedServer::close, "micronaut-shutdown"));
         Thread.currentThread().join();
     }
 
@@ -210,14 +238,147 @@ public final class MicronautSourceLauncher {
 
     private static Optional<String> packageName(Path sourceFile) throws IOException {
         String source = Files.readString(sourceFile, StandardCharsets.UTF_8);
-        var matcher = PACKAGE_DECLARATION.matcher(source);
-        if (matcher.find()) {
-            return Optional.of(matcher.group(1));
-        }
-        return Optional.empty();
+        return packageName(source);
     }
 
-    private static void compile(List<Path> sourceFiles, Path classesDir, LauncherClasspath launcherClasspath, List<String> annotationPatterns) throws IOException {
+    private static List<Path> writeTestSupportSources(Path workDir) throws IOException {
+        Path sourceDir = Files.createDirectories(workDir.resolve("test-support-sources"));
+        List<Path> sources = new ArrayList<>();
+        sources.add(writeSource(sourceDir, "io/micronaut/test/extensions/junit5/annotation/MicronautTest.java", """
+                package io.micronaut.test.extensions.junit5.annotation;
+
+                import java.lang.annotation.ElementType;
+                import java.lang.annotation.Retention;
+                import java.lang.annotation.RetentionPolicy;
+                import java.lang.annotation.Target;
+                import org.junit.jupiter.api.extension.ExtendWith;
+
+                @Retention(RetentionPolicy.RUNTIME)
+                @Target(ElementType.TYPE)
+                @ExtendWith(SourceMicronautTestExtension.class)
+                public @interface MicronautTest {
+                }
+                """));
+        sources.add(writeSource(sourceDir, "io/micronaut/test/extensions/junit5/annotation/SourceMicronautTestExtension.java", """
+                package io.micronaut.test.extensions.junit5.annotation;
+
+                import io.micronaut.http.client.HttpClient;
+                import io.micronaut.http.client.annotation.Client;
+                import jakarta.inject.Inject;
+                import java.lang.reflect.Field;
+                import java.net.URI;
+                import java.net.URL;
+                import java.util.ArrayList;
+                import java.util.List;
+                import org.junit.jupiter.api.extension.AfterEachCallback;
+                import org.junit.jupiter.api.extension.ExtensionContext;
+                import org.junit.jupiter.api.extension.ExtensionConfigurationException;
+                import org.junit.jupiter.api.extension.TestInstancePostProcessor;
+
+                final class SourceMicronautTestExtension implements TestInstancePostProcessor, AfterEachCallback {
+                    private static final ExtensionContext.Namespace NAMESPACE =
+                            ExtensionContext.Namespace.create(SourceMicronautTestExtension.class);
+
+                    @Override
+                    public void postProcessTestInstance(Object testInstance, ExtensionContext context) throws Exception {
+                        List<AutoCloseable> closeables = new ArrayList<>();
+                        for (Class<?> current = testInstance.getClass(); current != null; current = current.getSuperclass()) {
+                            for (Field field : current.getDeclaredFields()) {
+                                if (!field.isAnnotationPresent(Inject.class)) {
+                                    continue;
+                                }
+                                field.setAccessible(true);
+                                if (HttpClient.class.isAssignableFrom(field.getType())) {
+                                    HttpClient client = HttpClient.create(clientUrl(field));
+                                    closeables.add(client);
+                                    field.set(testInstance, client);
+                                } else {
+                                    throw new ExtensionConfigurationException(
+                                            "Only @Inject @Client HttpClient fields are supported by the source launcher test extension: "
+                                                    + field);
+                                }
+                            }
+                        }
+                        context.getStore(NAMESPACE).put(testInstance, closeables);
+                    }
+
+                    @Override
+                    public void afterEach(ExtensionContext context) throws Exception {
+                        Object testInstance = context.getRequiredTestInstance();
+                        @SuppressWarnings("unchecked")
+                        List<AutoCloseable> closeables = context.getStore(NAMESPACE).remove(testInstance, List.class);
+                        if (closeables == null) {
+                            return;
+                        }
+                        Exception failure = null;
+                        for (AutoCloseable closeable : closeables) {
+                            try {
+                                closeable.close();
+                            } catch (Exception e) {
+                                if (failure == null) {
+                                    failure = e;
+                                } else {
+                                    failure.addSuppressed(e);
+                                }
+                            }
+                        }
+                        if (failure != null) {
+                            throw failure;
+                        }
+                    }
+
+                    private static URL clientUrl(Field field) throws Exception {
+                        String baseUrl = System.getProperty("micronaut.source.test.url");
+                        if (baseUrl == null || baseUrl.isBlank()) {
+                            throw new ExtensionConfigurationException("Missing micronaut.source.test.url");
+                        }
+                        Client client = field.getAnnotation(Client.class);
+                        if (client == null || client.value().isBlank() || "/".equals(client.value())) {
+                            return URI.create(baseUrl).toURL();
+                        }
+                        String value = client.value();
+                        if (value.startsWith("http://") || value.startsWith("https://")) {
+                            return URI.create(value).toURL();
+                        }
+                        return URI.create(baseUrl).resolve(value.startsWith("/") ? value.substring(1) : value).toURL();
+                    }
+                }
+                """));
+        return sources;
+    }
+
+    private static Path writeSource(Path sourceDir, String relativePath, String source) throws IOException {
+        Path target = sourceDir.resolve(relativePath);
+        Files.createDirectories(target.getParent());
+        Files.writeString(target, source, StandardCharsets.UTF_8);
+        return target;
+    }
+
+    private static void compileApplicationAndTests(
+            List<Path> sourceFiles,
+            List<Path> testSourceFiles,
+            List<Path> testSupportSourceFiles,
+            Path classesDir,
+            LauncherClasspath launcherClasspath,
+            List<String> annotationPatterns
+    ) throws IOException {
+        compile(sourceFiles, classesDir, launcherClasspath, annotationPatterns, true, List.of());
+        if (!testSourceFiles.isEmpty()) {
+            List<Path> testCompileSourceFiles = new ArrayList<>(testSupportSourceFiles.size() + testSourceFiles.size());
+            testCompileSourceFiles.addAll(testSupportSourceFiles);
+            testCompileSourceFiles.addAll(testSourceFiles);
+            compile(testCompileSourceFiles, classesDir, launcherClasspath, List.of(), false, List.of(classesDir));
+        }
+    }
+
+    private static void compile(
+            List<Path> sourceFiles,
+            Path classesDir,
+            LauncherClasspath launcherClasspath,
+            List<String> annotationPatterns,
+            boolean annotationProcessing,
+            List<Path> additionalClassPath
+    ) throws IOException {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
             throw new IllegalStateException("No system Java compiler is available.");
@@ -226,27 +387,34 @@ public final class MicronautSourceLauncher {
         List<String> compilerOptions = new ArrayList<>(List.of(
                 "-d", classesDir.toString(),
                 "-parameters",
-                "-proc:full",
-                "-Amicronaut.processing.group=demo",
-                "-Amicronaut.processing.module=micronaut-source-demo"
+                annotationProcessing ? "-proc:full" : "-proc:none"
         ));
-        if (!annotationPatterns.isEmpty()) {
-            compilerOptions.add("-Amicronaut.processing.annotations=" + String.join(",", annotationPatterns));
+        if (annotationProcessing) {
+            compilerOptions.add("-Amicronaut.processing.group=demo");
+            compilerOptions.add("-Amicronaut.processing.module=micronaut-source-demo");
+            if (!annotationPatterns.isEmpty()) {
+                compilerOptions.add("-Amicronaut.processing.annotations=" + String.join(",", annotationPatterns));
+            }
         }
 
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         try (StandardJavaFileManager standardFileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
             standardFileManager.setLocationFromPaths(StandardLocation.ANNOTATION_PROCESSOR_PATH, List.of());
             JavaFileManager fileManager = standardFileManager;
+            List<Path> classPath = new ArrayList<>(additionalClassPath);
             if (launcherClasspath.inMemoryClassPath() == null) {
-                standardFileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, launcherClasspath.paths());
+                classPath.addAll(launcherClasspath.paths());
+                standardFileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, classPath);
             } else {
+                standardFileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, classPath);
                 fileManager = new InMemoryClassPathFileManager(standardFileManager, launcherClasspath.inMemoryClassPath());
             }
 
             Iterable<? extends JavaFileObject> files = standardFileManager.getJavaFileObjectsFromPaths(sourceFiles);
             JavaCompiler.CompilationTask task = compiler.getTask(null, fileManager, diagnostics, compilerOptions, null, files);
-            task.setProcessors(micronautProcessors());
+            if (annotationProcessing) {
+                task.setProcessors(micronautProcessors());
+            }
             if (!Boolean.TRUE.equals(task.call())) {
                 throw compilationFailed(diagnostics);
             }
@@ -276,7 +444,7 @@ public final class MicronautSourceLauncher {
         return sourceName + ":" + diagnostic.getLineNumber() + ": " + diagnostic.getKind() + ": " + diagnostic.getMessage(Locale.ROOT);
     }
 
-    private static EmbeddedServer startServer(
+    private static StartedServer startServer(
             Path classesDir,
             int port,
             Map<String, Object> launchProperties,
@@ -310,7 +478,91 @@ public final class MicronautSourceLauncher {
         phaseStartNanos = System.nanoTime();
         EmbeddedServer server = context.getBean(EmbeddedServer.class).start();
         timings.record("embedded server start", phaseStartNanos);
-        return server;
+        return new StartedServer(server, applicationClassLoader, context);
+    }
+
+    private static int runTests(List<Path> testSourceFiles, StartedServer startedServer) throws Exception {
+        List<Class<?>> testClasses = new ArrayList<>();
+        for (Path testSourceFile : testSourceFiles) {
+            testClasses.add(Class.forName(binaryName(testSourceFile), true, startedServer.applicationClassLoader()));
+        }
+
+        String oldTestUrl = System.getProperty("micronaut.source.test.url");
+        ClassLoader oldContextClassLoader = Thread.currentThread().getContextClassLoader();
+        Thread.currentThread().setContextClassLoader(startedServer.applicationClassLoader());
+        System.setProperty("micronaut.source.test.url", startedServer.server().getURL().toString());
+        try {
+            LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
+                    .selectors(testClasses.stream().map(DiscoverySelectors::selectClass).toList())
+                    .build();
+            Launcher launcher = LauncherFactory.create(LauncherConfig.builder()
+                    .enableTestEngineAutoRegistration(false)
+                    .enableLauncherSessionListenerAutoRegistration(false)
+                    .enableLauncherDiscoveryListenerAutoRegistration(false)
+                    .enablePostDiscoveryFilterAutoRegistration(false)
+                    .enableTestExecutionListenerAutoRegistration(false)
+                    .addTestEngines(new JupiterTestEngine())
+                    .build());
+            SummaryGeneratingListener summaryListener = new SummaryGeneratingListener();
+            launcher.execute(request, summaryListener, new ConsoleTestExecutionListener());
+            TestExecutionSummary summary = summaryListener.getSummary();
+            if (summary.getTestsFoundCount() == 0) {
+                System.out.println("No source tests found.");
+                return 1;
+            }
+            for (TestExecutionSummary.Failure failure : summary.getFailures()) {
+                failure.getException().printStackTrace(System.out);
+            }
+            System.out.println("Tests run: " + summary.getTestsStartedCount() + ", Failures: " + summary.getTestsFailedCount());
+            return Math.toIntExact(summary.getTestsFailedCount());
+        } finally {
+            Thread.currentThread().setContextClassLoader(oldContextClassLoader);
+            if (oldTestUrl == null) {
+                System.clearProperty("micronaut.source.test.url");
+            } else {
+                System.setProperty("micronaut.source.test.url", oldTestUrl);
+            }
+        }
+    }
+
+    private static String binaryName(Path sourceFile) throws IOException {
+        String source = Files.readString(sourceFile, StandardCharsets.UTF_8);
+        var classMatcher = TOP_LEVEL_CLASS_DECLARATION.matcher(source);
+        if (!classMatcher.find()) {
+            throw new IllegalArgumentException("No top-level class found in test source: " + sourceFile);
+        }
+        Optional<String> packageName = packageName(source);
+        return packageName.map(value -> value + "." + classMatcher.group(1)).orElse(classMatcher.group(1));
+    }
+
+    private static Optional<String> packageName(String source) {
+        var matcher = PACKAGE_DECLARATION.matcher(source);
+        if (matcher.find()) {
+            return Optional.of(matcher.group(1));
+        }
+        return Optional.empty();
+    }
+
+    private static final class ConsoleTestExecutionListener implements TestExecutionListener {
+        @Override
+        public void executionFinished(TestIdentifier testIdentifier, TestExecutionResult testExecutionResult) {
+            if (!testIdentifier.isTest()) {
+                return;
+            }
+            String status = switch (testExecutionResult.getStatus()) {
+                case SUCCESSFUL -> "PASS";
+                case FAILED -> "FAIL";
+                case ABORTED -> "SKIP";
+            };
+            System.out.println(status + " " + testIdentifier.getDisplayName());
+        }
+    }
+
+    private record StartedServer(EmbeddedServer server, ClassLoader applicationClassLoader, ApplicationContext applicationContext) {
+        private void close() {
+            server.stop();
+            applicationContext.stop();
+        }
     }
 
     private static final class StartupTimings {
@@ -616,21 +868,28 @@ public final class MicronautSourceLauncher {
 
     private record LaunchOptions(
             List<Path> sourcePaths,
+            List<Path> testSourcePaths,
             int port,
             List<String> annotationPatterns,
             Map<String, Object> properties,
-            boolean timings
+            boolean timings,
+            boolean test
     ) {
         static LaunchOptions parse(String[] args) {
             List<Path> sourcePaths = new ArrayList<>();
+            List<Path> testSourcePaths = new ArrayList<>();
             int port = 8080;
             List<String> annotationPatterns = new ArrayList<>();
             Map<String, Object> properties = new HashMap<>();
             boolean timings = Boolean.getBoolean("crema.timings");
+            boolean test = false;
+            boolean parsingTestSources = false;
 
             for (int i = 0; i < args.length; i++) {
                 String arg = args[i];
                 switch (arg) {
+                    case "--" -> parsingTestSources = true;
+                    case "--test" -> test = true;
                     case "--port" -> port = Integer.parseInt(requireValue(args, ++i, arg));
                     case "--timings" -> timings = true;
                     case "--package" -> annotationPatterns.addAll(annotationPatterns(requireValue(args, ++i, arg)));
@@ -644,20 +903,26 @@ public final class MicronautSourceLauncher {
                         if (arg.startsWith("-")) {
                             throw new IllegalArgumentException("Unknown option: " + arg);
                         }
-                        sourcePaths.add(Path.of(arg));
+                        if (parsingTestSources) {
+                            testSourcePaths.add(Path.of(arg));
+                        } else {
+                            sourcePaths.add(Path.of(arg));
+                        }
                     }
                 }
             }
 
-            if (sourcePaths.isEmpty()) {
+            if (sourcePaths.isEmpty() || (test && testSourcePaths.isEmpty())) {
                 usageAndExit();
             }
             return new LaunchOptions(
                     List.copyOf(sourcePaths),
+                    List.copyOf(testSourcePaths),
                     port,
                     List.copyOf(annotationPatterns),
                     Map.copyOf(properties),
-                    timings
+                    timings,
+                    test
             );
         }
 
@@ -670,6 +935,7 @@ public final class MicronautSourceLauncher {
 
         private static void usageAndExit() {
             System.err.println("Usage: ./micronaut [--port 8080] [--timings] [--package demo] [--property key=value] <source.java|source-directory>...");
+            System.err.println("       ./micronaut --test [--port 8080] <app-source.java|app-source-directory>... -- <test-source.java|test-source-directory>...");
             System.exit(2);
         }
 

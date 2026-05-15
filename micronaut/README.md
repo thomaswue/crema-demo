@@ -112,6 +112,47 @@ are scanned recursively, so multi-file examples work without a local build
 tool. Runtime configuration can be supplied with `--property key=value` or
 `-Dkey=value`.
 
+## Source Tests
+
+The launcher can also run a small Micronaut-style source test. Test mode
+compiles the application sources and test sources, starts the Micronaut server,
+injects `@Client("/") HttpClient` fields, and runs the tests through the real
+JUnit Platform launcher and Jupiter engine. For this demo, `@MicronautTest` is
+a small launcher-provided adapter that wires the running source-launched server
+into JUnit; the JUnit annotations and assertions are the real JUnit API.
+
+```java
+package examples.hello;
+
+import io.micronaut.http.client.HttpClient;
+import io.micronaut.http.client.annotation.Client;
+import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
+@MicronautTest
+final class HelloControllerTest {
+    @Inject
+    @Client("/")
+    HttpClient client;
+
+    @Test
+    void returnsHelloWorld() {
+        String response = client.toBlocking().retrieve("/hello");
+
+        assertEquals("hello world", response);
+    }
+}
+```
+
+Run the checked-in test from source:
+
+```sh
+./micronaut --test examples/hello -- examples/hello-test
+```
+
 ## Examples
 
 ```sh

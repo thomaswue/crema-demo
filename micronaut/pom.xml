@@ -15,6 +15,8 @@
         <native.maven.plugin.version>0.10.6</native.maven.plugin.version>
         <exec.maven.plugin.version>3.5.0</exec.maven.plugin.version>
         <maven.dependency.plugin.version>3.8.1</maven.dependency.plugin.version>
+        <junit.jupiter.version>5.13.4</junit.jupiter.version>
+        <junit.platform.version>1.13.4</junit.platform.version>
         <slf4j.version>2.0.17</slf4j.version>
     </properties>
 
@@ -65,6 +67,31 @@
         <dependency>
             <groupId>io.micronaut.validation</groupId>
             <artifactId>micronaut-validation-processor</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>${junit.jupiter.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <version>${junit.jupiter.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-launcher</artifactId>
+            <version>${junit.platform.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-engine</artifactId>
+            <version>${junit.platform.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.platform</groupId>
+            <artifactId>junit-platform-commons</artifactId>
+            <version>${junit.platform.version}</version>
         </dependency>
     </dependencies>
 
@@ -147,7 +174,7 @@
                         <buildArg>-H:+AllowJRTFileSystem</buildArg>
                         <buildArg>-H:+SharedArenaSupport</buildArg>
                         <buildArg>--enable-url-protocols=jar</buildArg>
-                        <buildArg>-H:Preserve=module=java.base,package=java.*,package=jdk.internal.*,package=sun.*,module=jdk.compiler,module=java.compiler,package=io.micronaut.*,package=jakarta.annotation,package=jakarta.annotation.*,package=jakarta.inject,package=jakarta.inject.*,package=jakarta.validation,package=jakarta.validation.*,package=org.objectweb.asm,package=org.objectweb.asm.*,package=com.github.javaparser,package=com.github.javaparser.*</buildArg>
+                        <buildArg>-H:Preserve=module=java.base,package=java.*,package=jdk.internal.*,package=sun.*,module=jdk.compiler,module=java.compiler,package=io.micronaut.*,package=jakarta.annotation,package=jakarta.annotation.*,package=jakarta.inject,package=jakarta.inject.*,package=jakarta.validation,package=jakarta.validation.*,package=org.junit.*,package=org.opentest4j.*,package=org.apiguardian.*,package=org.objectweb.asm,package=org.objectweb.asm.*,package=com.github.javaparser,package=com.github.javaparser.*</buildArg>
                         <buildArg>-H:IncludeResources=launcher-libs/.*\.jar|launcher-libs.index</buildArg>
                         <buildArg>--initialize-at-run-time=io.micronaut</buildArg>
                         <buildArg>--initialize-at-run-time=jdk.internal.org.jline.terminal.impl.ffm</buildArg>
