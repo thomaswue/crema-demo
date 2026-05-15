@@ -1,0 +1,11 @@
+[
+  {
+    "name": "io.micronaut.context.DefaultBeanContext",
+    "fields": [
+      {
+        "name": "beanDefinitionReferences",
+        "allowWrite": true
+      }
+    ]
+  }
+]

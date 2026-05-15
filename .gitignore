@@ -17,3 +17,8 @@
 /building/crema-srclauncher*
 /building/hellocrema
 /building/subst-out/
+
+# Micronaut launcher demo outputs.
+/micronaut/micronaut
+/micronaut/target/
+/micronaut/.tmp/
