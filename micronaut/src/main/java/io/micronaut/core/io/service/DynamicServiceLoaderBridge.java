@@ -2,6 +2,8 @@ package io.micronaut.core.io.service;
 
 import io.micronaut.context.ApplicationContext;
 import io.micronaut.context.DefaultBeanContext;
+import io.micronaut.core.beans.BeanIntrospectionReference;
+import io.micronaut.core.beans.BeanIntrospector;
 import io.micronaut.inject.BeanDefinitionReference;
 
 import java.io.IOException;
@@ -10,13 +12,16 @@ import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Stream;
 
 public final class DynamicServiceLoaderBridge {
     private static final String BEAN_DEFINITION_REFERENCE = "io.micronaut.inject.BeanDefinitionReference";
+    private static final String BEAN_INTROSPECTION_REFERENCE = "io.micronaut.core.beans.BeanIntrospectionReference";
 
     private DynamicServiceLoaderBridge() {
     }
@@ -26,20 +31,16 @@ public final class DynamicServiceLoaderBridge {
             ClassLoader classLoader,
             Path classesDir
     ) throws IOException {
-        Path serviceDir = classesDir.resolve("META-INF").resolve("micronaut").resolve(BEAN_DEFINITION_REFERENCE);
-        if (!Files.isDirectory(serviceDir)) {
-            return;
-        }
+        addGeneratedBeanReferences(context, classLoader, classesDir);
+        addGeneratedIntrospectionReferences(classLoader, classesDir);
+    }
 
-        List<String> generatedReferences;
-        try (Stream<Path> files = Files.list(serviceDir)) {
-            generatedReferences = files
-                    .filter(Files::isRegularFile)
-                    .map(path -> path.getFileName().toString())
-                    .sorted()
-                    .toList();
-        }
-
+    private static void addGeneratedBeanReferences(
+            ApplicationContext context,
+            ClassLoader classLoader,
+            Path classesDir
+    ) throws IOException {
+        List<String> generatedReferences = generatedServiceClassNames(classesDir, BEAN_DEFINITION_REFERENCE);
         if (generatedReferences.isEmpty()) {
             return;
         }
@@ -57,11 +58,52 @@ public final class DynamicServiceLoaderBridge {
         }
         for (String generatedReference : generatedReferences) {
             if (seenReferences.add(generatedReference)) {
-                references.add(instantiate(classLoader, generatedReference));
+                references.add(instantiate(classLoader, generatedReference, BeanDefinitionReference.class));
             }
         }
 
         setBeanDefinitionReferences(context, references);
+    }
+
+    private static void addGeneratedIntrospectionReferences(ClassLoader classLoader, Path classesDir) throws IOException {
+        List<String> generatedReferences = generatedServiceClassNames(classesDir, BEAN_INTROSPECTION_REFERENCE);
+        if (generatedReferences.isEmpty()) {
+            return;
+        }
+
+        List<BeanIntrospectionReference> references = new ArrayList<>(
+                MicronautMetaServiceLoaderUtils.findMetaMicronautServiceEntries(
+                        classLoader,
+                        BeanIntrospectionReference.class,
+                        null
+                )
+        );
+        Set<String> seenReferences = new HashSet<>();
+        for (BeanIntrospectionReference reference : references) {
+            seenReferences.add(reference.getClass().getName());
+        }
+        for (String generatedReference : generatedReferences) {
+            if (seenReferences.add(generatedReference)) {
+                references.add(instantiate(classLoader, generatedReference, BeanIntrospectionReference.class));
+            }
+        }
+
+        setBeanIntrospectionReferences(references);
+    }
+
+    private static List<String> generatedServiceClassNames(Path classesDir, String serviceName) throws IOException {
+        Path serviceDir = classesDir.resolve("META-INF").resolve("micronaut").resolve(serviceName);
+        if (!Files.isDirectory(serviceDir)) {
+            return List.of();
+        }
+
+        try (Stream<Path> files = Files.list(serviceDir)) {
+            return files
+                    .filter(Files::isRegularFile)
+                    .map(path -> path.getFileName().toString())
+                    .sorted()
+                    .toList();
+        }
     }
 
     private static void setBeanDefinitionReferences(
@@ -77,11 +119,26 @@ public final class DynamicServiceLoaderBridge {
         }
     }
 
-    private static BeanDefinitionReference instantiate(ClassLoader classLoader, String className) {
+    private static void setBeanIntrospectionReferences(List<BeanIntrospectionReference> references) {
         try {
-            return (BeanDefinitionReference) Class.forName(className, false, classLoader)
+            Map<String, BeanIntrospectionReference<?>> introspections = new HashMap<>();
+            for (BeanIntrospectionReference<?> reference : references) {
+                introspections.put(reference.getName(), reference);
+            }
+
+            Field field = BeanIntrospector.SHARED.getClass().getDeclaredField("introspectionMap");
+            field.setAccessible(true);
+            field.set(BeanIntrospector.SHARED, introspections);
+        } catch (ReflectiveOperationException e) {
+            throw new IllegalStateException("Cannot install dynamic Micronaut bean introspections", e);
+        }
+    }
+
+    private static <T> T instantiate(ClassLoader classLoader, String className, Class<T> type) {
+        try {
+            return type.cast(Class.forName(className, false, classLoader)
                     .getDeclaredConstructor()
-                    .newInstance();
+                    .newInstance());
         } catch (ClassNotFoundException | NoSuchMethodException | InstantiationException | IllegalAccessException e) {
             throw new IllegalStateException("Cannot load generated Micronaut service: " + className, e);
         } catch (InvocationTargetException e) {

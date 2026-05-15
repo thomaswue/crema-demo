@@ -56,7 +56,7 @@ public final class MicronautSourceLauncher {
         long startNanos = System.nanoTime();
         List<Path> libs = extractLauncherLibs(libsDir);
         compile(sourceFiles, classesDir, libs, annotationPatterns);
-        EmbeddedServer server = startServer(classesDir, libs, options.port());
+        EmbeddedServer server = startServer(classesDir, libs, options.port(), options.properties());
         long elapsedMillis = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
 
         System.out.println("Micronaut source launcher started " + server.getURL() + " in " + elapsedMillis + " ms");
@@ -211,7 +211,12 @@ public final class MicronautSourceLauncher {
         return sourceName + ":" + diagnostic.getLineNumber() + ": " + diagnostic.getKind() + ": " + diagnostic.getMessage(Locale.ROOT);
     }
 
-    private static EmbeddedServer startServer(Path classesDir, List<Path> libs, int port) throws Exception {
+    private static EmbeddedServer startServer(
+            Path classesDir,
+            List<Path> libs,
+            int port,
+            Map<String, Object> launchProperties
+    ) throws Exception {
         List<URL> urls = new ArrayList<>(libs.size() + 1);
         urls.add(classesDir.toUri().toURL());
         for (Path lib : libs) {
@@ -223,6 +228,7 @@ public final class MicronautSourceLauncher {
 
         Map<String, Object> properties = new HashMap<>();
         properties.put("micronaut.application.name", "micronaut-source-demo");
+        properties.putAll(launchProperties);
         properties.put("micronaut.server.port", port);
 
         ApplicationContextBuilder builder = ApplicationContext.builder()
@@ -234,19 +240,30 @@ public final class MicronautSourceLauncher {
         return context.getBean(EmbeddedServer.class).start();
     }
 
-    private record LaunchOptions(List<Path> sourcePaths, int port, List<String> annotationPatterns) {
+    private record LaunchOptions(
+            List<Path> sourcePaths,
+            int port,
+            List<String> annotationPatterns,
+            Map<String, Object> properties
+    ) {
         static LaunchOptions parse(String[] args) {
             List<Path> sourcePaths = new ArrayList<>();
             int port = 8080;
             List<String> annotationPatterns = new ArrayList<>();
+            Map<String, Object> properties = new HashMap<>();
 
             for (int i = 0; i < args.length; i++) {
                 String arg = args[i];
                 switch (arg) {
                     case "--port" -> port = Integer.parseInt(requireValue(args, ++i, arg));
                     case "--package" -> annotationPatterns.addAll(annotationPatterns(requireValue(args, ++i, arg)));
+                    case "--property" -> addProperty(properties, requireValue(args, ++i, arg));
                     case "--help", "-h" -> usageAndExit();
                     default -> {
+                        if (arg.startsWith("-D")) {
+                            addProperty(properties, arg.substring(2));
+                            continue;
+                        }
                         if (arg.startsWith("-")) {
                             throw new IllegalArgumentException("Unknown option: " + arg);
                         }
@@ -258,7 +275,12 @@ public final class MicronautSourceLauncher {
             if (sourcePaths.isEmpty()) {
                 usageAndExit();
             }
-            return new LaunchOptions(List.copyOf(sourcePaths), port, List.copyOf(annotationPatterns));
+            return new LaunchOptions(
+                    List.copyOf(sourcePaths),
+                    port,
+                    List.copyOf(annotationPatterns),
+                    Map.copyOf(properties)
+            );
         }
 
         private static String requireValue(String[] args, int index, String option) {
@@ -269,8 +291,16 @@ public final class MicronautSourceLauncher {
         }
 
         private static void usageAndExit() {
-            System.err.println("Usage: ./micronaut [--port 8080] [--package demo] <source.java|source-directory>...");
+            System.err.println("Usage: ./micronaut [--port 8080] [--package demo] [--property key=value] <source.java|source-directory>...");
             System.exit(2);
+        }
+
+        private static void addProperty(Map<String, Object> properties, String property) {
+            int separator = property.indexOf('=');
+            if (separator <= 0) {
+                throw new IllegalArgumentException("Property must use key=value syntax: " + property);
+            }
+            properties.put(property.substring(0, separator), property.substring(separator + 1));
         }
 
         private static List<String> annotationPatterns(String packages) {

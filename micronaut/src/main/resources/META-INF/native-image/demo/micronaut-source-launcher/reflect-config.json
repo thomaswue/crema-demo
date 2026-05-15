@@ -7,5 +7,14 @@
         "allowWrite": true
       }
     ]
+  },
+  {
+    "name": "io.micronaut.core.beans.DefaultBeanIntrospector",
+    "fields": [
+      {
+        "name": "introspectionMap",
+        "allowWrite": true
+      }
+    ]
   }
 ]

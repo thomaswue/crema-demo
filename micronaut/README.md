@@ -10,6 +10,9 @@ Micronaut framework pieces are available from the launcher, with Micronaut
 initialized at runtime and its packages preserved for runtime-loaded
 application classes.
 
+The launcher also bakes in Micronaut validation, the declarative HTTP client,
+and Jackson support so guide-style examples can run from source.
+
 ## Requirements
 
 - macOS on Apple Silicon
@@ -54,7 +57,8 @@ Use another port if needed:
 
 The launcher accepts one or more Java source files or directories. Directories
 are scanned recursively, so multi-file examples work without a local build
-tool.
+tool. Runtime configuration can be supplied with `--property key=value` or
+`-Dkey=value`.
 
 ## Examples
 
@@ -70,12 +74,43 @@ curl http://localhost:8082/message/crema
 
 ./micronaut --port 8083 examples/injection
 curl http://localhost:8083/injection/Grace
+
+./micronaut --port 8084 \
+  --property warehouse.name=Crema \
+  --property warehouse.limits.max-items=42 \
+  --property warehouse.limits.refrigerated=true \
+  examples/configuration
+curl http://localhost:8084/warehouse/summary
+
+./micronaut --port 8085 examples/client
+curl http://localhost:8085/client/greet/Turing
+
+./micronaut --port 8086 examples/validation
+curl -H 'Content-Type: application/json' \
+  -d '{"title":"Native Micronaut","pages":123}' \
+  http://localhost:8086/books
 ```
 
 The examples cover a plain text controller, path variables, JSON serialization,
-and dependency injection across multiple source files.
+dependency injection across multiple source files, configuration properties,
+declarative HTTP clients, and validation of JSON request bodies.
+
+All examples can also be launched together:
+
+```sh
+./micronaut --port 8080 \
+  --property warehouse.name=Crema \
+  --property warehouse.limits.max-items=42 \
+  --property warehouse.limits.refrigerated=true \
+  examples
+```
 
 By default, the launcher infers Micronaut annotation-processing packages from
 the source files. Use `--package demo` or `--package com.example,com.other`
 to override that inference. Micronaut itself rejects beans in the default Java
 package, so source controllers must use a named package.
+
+Native Image is configured to preserve `java.base` broadly, along with the
+compiler, Micronaut, validation, Jakarta, ASM, and JavaParser packages needed by
+runtime-loaded source applications. This makes the demo more flexible, at the
+cost of a larger native launcher.
