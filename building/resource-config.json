@@ -1,0 +1,15 @@
+{
+  "resources": {
+    "includes": [
+        {"pattern":"\\QMETA-INF/services/javax.tools.JavaCompiler\\E"}
+      ]
+  },
+  "bundles": [
+      {"name":"com.sun.org.apache.xml.internal.serializer.XMLEntities"},
+      {"name":"com.sun.tools.javac.resources.compiler"},
+      {"name":"com.sun.tools.javac.resources.javac"},
+      {"name":"com.sun.tools.javac.resources.launcher"},
+      {"name":"jdk.internal.jshell.tool.resources.l10n"},
+      {"name":"jdk.internal.jshell.tool.resources.version"}
+    ]
+}

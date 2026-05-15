@@ -1,0 +1,19 @@
+.DS_Store
+*.class
+*.iprof
+*.gz
+*.zip
+*.tar
+*.tgz
+*.dylib
+*.so
+*.dSYM/
+
+# Built or supplied locally for the demo.
+/crema
+
+# Generated native images and local launch outputs.
+/script
+/building/crema-srclauncher*
+/building/hellocrema
+/building/subst-out/
