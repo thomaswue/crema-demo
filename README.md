@@ -77,6 +77,6 @@ Sample result on this machine:
 - `building/` is an optional build workbench for the native source launcher.
 - `micronaut/` is a second demo that builds a native `micronaut` launcher with
   Micronaut, Netty, `javac`, and the Micronaut annotation processor baked in,
-  then compiles and runs a source controller at launch time.
+  then compiles and runs source controller applications at launch time.
 - Generated files such as `crema`, `script`, `*.class`, archives, profile data,
   and Native Image build outputs are ignored.

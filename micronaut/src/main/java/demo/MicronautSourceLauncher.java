@@ -15,7 +15,6 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.UncheckedIOException;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
@@ -25,14 +24,20 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Optional;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public final class MicronautSourceLauncher {
     private static final String LIB_INDEX = "launcher-libs.index";
+    private static final Pattern PACKAGE_DECLARATION = Pattern.compile(
+            "(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;"
+    );
 
     private MicronautSourceLauncher() {
     }
@@ -41,10 +46,8 @@ public final class MicronautSourceLauncher {
         configureJavaHome();
 
         LaunchOptions options = LaunchOptions.parse(args);
-        Path sourceFile = options.sourceFile().toAbsolutePath().normalize();
-        if (!Files.isRegularFile(sourceFile)) {
-            throw new IllegalArgumentException("Source file does not exist: " + sourceFile);
-        }
+        List<Path> sourceFiles = collectSourceFiles(options.sourcePaths());
+        List<String> annotationPatterns = annotationPatterns(sourceFiles, options.annotationPatterns());
 
         Path workDir = Files.createTempDirectory("micronaut-source-launcher-");
         Path classesDir = Files.createDirectories(workDir.resolve("classes"));
@@ -52,7 +55,7 @@ public final class MicronautSourceLauncher {
 
         long startNanos = System.nanoTime();
         List<Path> libs = extractLauncherLibs(libsDir);
-        compile(sourceFile, classesDir, libs, options.packagePrefix());
+        compile(sourceFiles, classesDir, libs, annotationPatterns);
         EmbeddedServer server = startServer(classesDir, libs, options.port());
         long elapsedMillis = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
 
@@ -105,7 +108,65 @@ public final class MicronautSourceLauncher {
         }
     }
 
-    private static void compile(Path sourceFile, Path classesDir, List<Path> libs, String packagePrefix) throws IOException {
+    private static List<Path> collectSourceFiles(List<Path> sourcePaths) throws IOException {
+        LinkedHashSet<Path> sourceFiles = new LinkedHashSet<>();
+        for (Path sourcePath : sourcePaths) {
+            Path path = sourcePath.toAbsolutePath().normalize();
+            if (Files.isRegularFile(path)) {
+                if (!path.getFileName().toString().endsWith(".java")) {
+                    throw new IllegalArgumentException("Source file is not a Java file: " + path);
+                }
+                sourceFiles.add(path);
+            } else if (Files.isDirectory(path)) {
+                try (Stream<Path> files = Files.walk(path)) {
+                    files.filter(Files::isRegularFile)
+                            .filter(file -> file.getFileName().toString().endsWith(".java"))
+                            .sorted()
+                            .forEach(sourceFiles::add);
+                }
+            } else {
+                throw new IllegalArgumentException("Source path does not exist: " + path);
+            }
+        }
+
+        if (sourceFiles.isEmpty()) {
+            throw new IllegalArgumentException("No Java source files found.");
+        }
+        return List.copyOf(sourceFiles);
+    }
+
+    private static List<String> annotationPatterns(List<Path> sourceFiles, List<String> configuredPatterns) throws IOException {
+        if (!configuredPatterns.isEmpty()) {
+            return configuredPatterns;
+        }
+
+        LinkedHashSet<String> packages = new LinkedHashSet<>();
+        boolean hasDefaultPackage = false;
+        for (Path sourceFile : sourceFiles) {
+            Optional<String> packageName = packageName(sourceFile);
+            if (packageName.isPresent()) {
+                packages.add(packageName.get() + ".*");
+            } else {
+                hasDefaultPackage = true;
+            }
+        }
+
+        if (hasDefaultPackage) {
+            return List.of();
+        }
+        return List.copyOf(packages);
+    }
+
+    private static Optional<String> packageName(Path sourceFile) throws IOException {
+        String source = Files.readString(sourceFile, StandardCharsets.UTF_8);
+        var matcher = PACKAGE_DECLARATION.matcher(source);
+        if (matcher.find()) {
+            return Optional.of(matcher.group(1));
+        }
+        return Optional.empty();
+    }
+
+    private static void compile(List<Path> sourceFiles, Path classesDir, List<Path> libs, List<String> annotationPatterns) throws IOException {
         JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
         if (compiler == null) {
             throw new IllegalStateException("No system Java compiler is available.");
@@ -114,20 +175,22 @@ public final class MicronautSourceLauncher {
         String classpath = libs.stream()
                 .map(Path::toString)
                 .collect(Collectors.joining(System.getProperty("path.separator")));
-        List<String> compilerOptions = List.of(
+        List<String> compilerOptions = new ArrayList<>(List.of(
                 "-d", classesDir.toString(),
                 "-classpath", classpath,
                 "-processorpath", classpath,
                 "-parameters",
                 "-proc:full",
                 "-Amicronaut.processing.group=demo",
-                "-Amicronaut.processing.module=micronaut-source-demo",
-                "-Amicronaut.processing.annotations=" + packagePrefix + ".*"
-        );
+                "-Amicronaut.processing.module=micronaut-source-demo"
+        ));
+        if (!annotationPatterns.isEmpty()) {
+            compilerOptions.add("-Amicronaut.processing.annotations=" + String.join(",", annotationPatterns));
+        }
 
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         try (StandardJavaFileManager fileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
-            Iterable<? extends JavaFileObject> files = fileManager.getJavaFileObjectsFromPaths(List.of(sourceFile));
+            Iterable<? extends JavaFileObject> files = fileManager.getJavaFileObjectsFromPaths(sourceFiles);
             JavaCompiler.CompilationTask task = compiler.getTask(null, fileManager, diagnostics, compilerOptions, null, files);
             if (!Boolean.TRUE.equals(task.call())) {
                 throw compilationFailed(diagnostics);
@@ -139,7 +202,7 @@ public final class MicronautSourceLauncher {
         String message = diagnostics.getDiagnostics().stream()
                 .map(MicronautSourceLauncher::formatDiagnostic)
                 .collect(Collectors.joining(System.lineSeparator()));
-        return new IllegalStateException("Controller compilation failed:" + System.lineSeparator() + message);
+        return new IllegalStateException("Application compilation failed:" + System.lineSeparator() + message);
     }
 
     private static String formatDiagnostic(Diagnostic<? extends JavaFileObject> diagnostic) {
@@ -171,34 +234,31 @@ public final class MicronautSourceLauncher {
         return context.getBean(EmbeddedServer.class).start();
     }
 
-    private record LaunchOptions(Path sourceFile, int port, String packagePrefix) {
+    private record LaunchOptions(List<Path> sourcePaths, int port, List<String> annotationPatterns) {
         static LaunchOptions parse(String[] args) {
-            Path sourceFile = null;
+            List<Path> sourcePaths = new ArrayList<>();
             int port = 8080;
-            String packagePrefix = "demo";
+            List<String> annotationPatterns = new ArrayList<>();
 
             for (int i = 0; i < args.length; i++) {
                 String arg = args[i];
                 switch (arg) {
                     case "--port" -> port = Integer.parseInt(requireValue(args, ++i, arg));
-                    case "--package" -> packagePrefix = requireValue(args, ++i, arg);
+                    case "--package" -> annotationPatterns.addAll(annotationPatterns(requireValue(args, ++i, arg)));
                     case "--help", "-h" -> usageAndExit();
                     default -> {
                         if (arg.startsWith("-")) {
                             throw new IllegalArgumentException("Unknown option: " + arg);
                         }
-                        if (sourceFile != null) {
-                            throw new IllegalArgumentException("Only one source file can be launched.");
-                        }
-                        sourceFile = Path.of(arg);
+                        sourcePaths.add(Path.of(arg));
                     }
                 }
             }
 
-            if (sourceFile == null) {
+            if (sourcePaths.isEmpty()) {
                 usageAndExit();
             }
-            return new LaunchOptions(Objects.requireNonNull(sourceFile), port, packagePrefix);
+            return new LaunchOptions(List.copyOf(sourcePaths), port, List.copyOf(annotationPatterns));
         }
 
         private static String requireValue(String[] args, int index, String option) {
@@ -209,8 +269,16 @@ public final class MicronautSourceLauncher {
         }
 
         private static void usageAndExit() {
-            System.err.println("Usage: ./micronaut [--port 8080] [--package demo] HelloController.java");
+            System.err.println("Usage: ./micronaut [--port 8080] [--package demo] <source.java|source-directory>...");
             System.exit(2);
+        }
+
+        private static List<String> annotationPatterns(String packages) {
+            return Stream.of(packages.split(","))
+                    .map(String::trim)
+                    .filter(value -> !value.isEmpty())
+                    .map(value -> value.endsWith(".*") || value.equals("*") ? value : value + ".*")
+                    .toList();
         }
     }
 }

@@ -139,7 +139,7 @@
                         <buildArg>-H:+AllowJRTFileSystem</buildArg>
                         <buildArg>-H:+SharedArenaSupport</buildArg>
                         <buildArg>--enable-url-protocols=jar</buildArg>
-                        <buildArg>-H:Preserve=module=jdk.compiler,module=java.compiler,package=java.util,package=io.micronaut.*,package=jakarta.annotation,package=jakarta.annotation.*,package=jakarta.inject,package=jakarta.inject.*,package=org.objectweb.asm,package=org.objectweb.asm.*,package=com.github.javaparser,package=com.github.javaparser.*</buildArg>
+                        <buildArg>-H:Preserve=module=java.base,module=jdk.compiler,module=java.compiler,package=io.micronaut.*,package=jakarta.annotation,package=jakarta.annotation.*,package=jakarta.inject,package=jakarta.inject.*,package=org.objectweb.asm,package=org.objectweb.asm.*,package=com.github.javaparser,package=com.github.javaparser.*</buildArg>
                         <buildArg>-H:IncludeResources=launcher-libs/.*\.jar|launcher-libs.index</buildArg>
                         <buildArg>--initialize-at-run-time=io.micronaut</buildArg>
                         <buildArg>--initialize-at-run-time=jdk.internal.org.jline.terminal.impl.ffm</buildArg>
