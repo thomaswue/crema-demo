@@ -183,7 +183,7 @@
         <profile>
             <id>pgo</id>
             <properties>
-                <pgo.profile>target/pgo/hello.iprof</pgo.profile>
+                <pgo.profile>target/pgo/startup-01.iprof</pgo.profile>
             </properties>
             <build>
                 <plugins>

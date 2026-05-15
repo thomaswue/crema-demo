@@ -36,14 +36,17 @@ To build a PGO-optimized launcher trained on the hello world controller:
 ./build-pgo.sh
 ```
 
-This first builds `./micronaut-profiled` with sampled PGO collection, runs it
-against `examples/hello`, writes a sampling profile under `target/pgo/`, and
-then builds the final optimized `./micronaut` executable.
+This first builds `./micronaut-profiled` with sampled PGO collection, then runs
+several fresh startup-only training launches against `examples/hello`. By
+default, each training launch is stopped immediately after the startup line is
+printed, so the collected profiles are biased toward source extraction, javac
+parsing and annotation processing, and Micronaut bootstrap rather than
+steady-state request handling. The script writes startup profiles under
+`target/pgo/` and then builds the final optimized `./micronaut` executable.
 
-On the test machine, a paired 12-run hello controller benchmark showed a small
-startup improvement from sampled PGO: 177.4 ms average for the regular native
-launcher and 173.4 ms for the PGO launcher. Excluding the first two runs of
-each executable, the averages were 173.6 ms and 172.1 ms.
+The default training run count is 12. Override it with `PGO_TRAIN_RUNS=...`.
+If you also want the profile to include request handling, set
+`PGO_TRAIN_REQUESTS=...`; the default is `0`.
 
 For faster development, run the launcher on the JVM:
 
