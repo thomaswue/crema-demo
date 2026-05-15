@@ -13,6 +13,11 @@ application classes.
 The launcher also bakes in Micronaut validation, the declarative HTTP client,
 and Jackson support so guide-style examples can run from source.
 
+For the native launcher, embedded Micronaut and compiler dependencies are
+indexed from the image resources and served to `javac` through an in-memory file
+manager. The older disk extraction path is kept as a fallback for development
+and diagnostics.
+
 ## Requirements
 
 - macOS on Apple Silicon
@@ -55,6 +60,35 @@ For faster development, run the launcher on the JVM:
 ```
 
 ## Run
+
+Minimal single-file controller:
+
+```java
+package demo;
+
+import io.micronaut.http.MediaType;
+import io.micronaut.http.annotation.Controller;
+import io.micronaut.http.annotation.Get;
+import io.micronaut.http.annotation.Produces;
+
+@Controller("/hello")
+public final class HelloController {
+    @Get
+    @Produces(MediaType.TEXT_PLAIN)
+    String index() {
+        return "hello world";
+    }
+}
+```
+
+Run that file directly:
+
+```sh
+./micronaut HelloController.java
+curl http://localhost:8080/hello
+```
+
+Or run one of the checked-in example directories:
 
 ```sh
 ./micronaut examples/hello
