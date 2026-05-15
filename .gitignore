@@ -20,5 +20,7 @@
 
 # Micronaut launcher demo outputs.
 /micronaut/micronaut
+/micronaut/micronaut-instrumented
+/micronaut/micronaut-profiled
 /micronaut/target/
 /micronaut/.tmp/

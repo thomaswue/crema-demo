@@ -30,6 +30,21 @@ and Jackson support so guide-style examples can run from source.
 
 The generated `./micronaut` launcher is ignored by Git.
 
+To build a PGO-optimized launcher trained on the hello world controller:
+
+```sh
+./build-pgo.sh
+```
+
+This first builds `./micronaut-profiled` with sampled PGO collection, runs it
+against `examples/hello`, writes a sampling profile under `target/pgo/`, and
+then builds the final optimized `./micronaut` executable.
+
+On the test machine, a paired 12-run hello controller benchmark showed a small
+startup improvement from sampled PGO: 177.4 ms average for the regular native
+launcher and 173.4 ms for the PGO launcher. Excluding the first two runs of
+each executable, the averages were 173.6 ms and 172.1 ms.
+
 For faster development, run the launcher on the JVM:
 
 ```sh
