@@ -10,6 +10,6 @@ public final class HelloController {
     @Get
     @Produces(MediaType.TEXT_PLAIN)
     String index() {
-        return "hello world";
+        return "hello world !!!";
     }
 }
