@@ -130,7 +130,7 @@ public final class MicronautSourceLauncher {
         List<Path> dependencyClasspath = dependencyClasspath(options);
         timings.record("resolve deps.yml", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
-        InMemoryClassPath launcherClasspath = InMemoryClassPath.fromLauncherResources();
+        InMemoryClassPath launcherClasspath = InMemoryClassPath.fromLauncherResources(options.test());
         timings.record("index launcher libs", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
         InMemoryCompilationOutput compiledOutput = compileApplicationAndTests(
@@ -1185,11 +1185,14 @@ public final class MicronautSourceLauncher {
             this.byPackageName = byPackageName;
         }
 
-        private static InMemoryClassPath fromLauncherResources() throws IOException {
+        private static InMemoryClassPath fromLauncherResources(boolean includeTestLibraries) throws IOException {
             ClassLoader classLoader = MicronautSourceLauncher.class.getClassLoader();
             Map<String, InMemoryClassFile> byBinaryName = new HashMap<>();
             Map<String, List<InMemoryClassFile>> byPackageName = new HashMap<>();
             for (String resource : readLibIndex(classLoader)) {
+                if (!isJavacClasspathLibrary(resource, includeTestLibraries)) {
+                    continue;
+                }
                 try (InputStream in = classLoader.getResourceAsStream(resource)) {
                     if (in == null) {
                         throw new IOException("Missing launcher resource: " + resource);
@@ -1198,6 +1201,31 @@ public final class MicronautSourceLauncher {
                 }
             }
             return new InMemoryClassPath(Map.copyOf(byBinaryName), copyPackageIndex(byPackageName));
+        }
+
+        private static boolean isJavacClasspathLibrary(String resource, boolean includeTestLibraries) {
+            String fileName = resource.substring(resource.lastIndexOf('/') + 1);
+            if (!includeTestLibraries && isTestLibrary(fileName)) {
+                return false;
+            }
+            return !isDependencyResolverLibrary(fileName);
+        }
+
+        private static boolean isTestLibrary(String fileName) {
+            return fileName.startsWith("junit-") ||
+                    fileName.startsWith("apiguardian-api-") ||
+                    fileName.startsWith("opentest4j-") ||
+                    fileName.startsWith("micronaut-test-");
+        }
+
+        private static boolean isDependencyResolverLibrary(String fileName) {
+            return fileName.startsWith("maven-") ||
+                    fileName.startsWith("org.eclipse.sisu.") ||
+                    fileName.startsWith("plexus-") ||
+                    fileName.startsWith("commons-codec-") ||
+                    fileName.startsWith("commons-logging-") ||
+                    fileName.startsWith("httpclient-") ||
+                    fileName.startsWith("httpcore-");
         }
 
         private static void indexJar(
