@@ -78,5 +78,8 @@ Sample result on this machine:
 - `micronaut/` is a second demo that builds a native `micronaut` launcher with
   Micronaut, Netty, `javac`, and the Micronaut annotation processor baked in,
   then compiles and runs source controller applications at launch time.
+- `micronaut-reference/` is a conventional Maven Micronaut hello-world app used
+  to benchmark `mvn test` on the JVM against the native Micronaut source
+  launcher test mode.
 - Generated files such as `crema`, `script`, `*.class`, archives, profile data,
   and Native Image build outputs are ignored.

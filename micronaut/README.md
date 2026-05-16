@@ -203,6 +203,12 @@ Run the checked-in test from source:
 ./micronaut --test examples/hello -- tests/hello
 ```
 
+For a regular Maven/JVM comparison, see `../micronaut-reference`:
+
+```sh
+(cd ../micronaut-reference && ./benchmark.sh)
+```
+
 ## Examples
 
 ```sh

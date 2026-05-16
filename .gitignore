@@ -24,3 +24,6 @@
 /micronaut/micronaut-profiled
 /micronaut/target/
 /micronaut/.tmp/
+
+# Reference Maven app build outputs.
+/micronaut-reference/target/
