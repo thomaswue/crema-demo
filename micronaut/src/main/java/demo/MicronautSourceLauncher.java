@@ -74,6 +74,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -86,6 +87,8 @@ import org.w3c.dom.Node;
 public final class MicronautSourceLauncher {
     private static final String LIB_INDEX = "launcher-libs.index";
     private static final String DEFAULT_DEPS_FILE = "deps.yml";
+    private static final String TEST_CLASSES_DIR_PROPERTY = "micronaut.source.test.classes-dir";
+    private static final String TEST_PROPERTIES_FILE_PROPERTY = "micronaut.source.test.properties-file";
     private static final Pattern PACKAGE_DECLARATION = Pattern.compile(
             "(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;"
     );
@@ -104,6 +107,9 @@ public final class MicronautSourceLauncher {
         List<Path> sourceFiles = collectSourceFiles(options.sourcePaths());
         List<Path> testSourceFiles = options.test() ? collectSourceFiles(options.testSourcePaths()) : List.of();
         List<String> annotationPatterns = annotationPatterns(sourceFiles, options.annotationPatterns());
+        List<String> testAnnotationPatterns = options.test()
+                ? annotationPatterns(concat(sourceFiles, testSourceFiles), options.annotationPatterns())
+                : List.of();
 
         Path workDir = Files.createTempDirectory("micronaut-source-launcher-");
         Path classesDir = Files.createDirectories(workDir.resolve("classes"));
@@ -119,8 +125,24 @@ public final class MicronautSourceLauncher {
         InMemoryClassPath launcherClasspath = InMemoryClassPath.fromLauncherResources();
         timings.record("index launcher libs", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
-        compileApplicationAndTests(sourceFiles, testSourceFiles, testSupportSourceFiles, classesDir, launcherClasspath, dependencyClasspath, annotationPatterns);
+        compileApplicationAndTests(
+                sourceFiles,
+                testSourceFiles,
+                testSupportSourceFiles,
+                classesDir,
+                launcherClasspath,
+                dependencyClasspath,
+                annotationPatterns,
+                testAnnotationPatterns
+        );
         timings.record("javac and annotation processing", phaseStartNanos);
+        if (options.test()) {
+            int failures = runTests(testSourceFiles, classesDir, dependencyClasspath, workDir, options.port(), options.properties(), timings);
+            timings.print();
+            System.exit(failures > 0 ? 1 : 0);
+            return;
+        }
+
         phaseStartNanos = System.nanoTime();
         StartedServer startedServer = startServer(classesDir, dependencyClasspath, options.port(), options.properties(), timings);
         timings.record("server setup total", phaseStartNanos);
@@ -129,18 +151,15 @@ public final class MicronautSourceLauncher {
         timings.print();
         EmbeddedServer server = startedServer.server();
         System.out.println("Micronaut source launcher started " + server.getURL() + " in " + elapsedMillis + " ms");
-        if (options.test()) {
-            int failures = 1;
-            try {
-                failures = runTests(testSourceFiles, startedServer);
-            } finally {
-                startedServer.close();
-            }
-            System.exit(failures > 0 ? 1 : 0);
-            return;
-        }
         Runtime.getRuntime().addShutdownHook(new Thread(startedServer::close, "micronaut-shutdown"));
         Thread.currentThread().join();
+    }
+
+    private static List<Path> concat(List<Path> first, List<Path> second) {
+        List<Path> result = new ArrayList<>(first.size() + second.size());
+        result.addAll(first);
+        result.addAll(second);
+        return List.copyOf(result);
     }
 
     private static void configureJavaHome() {
@@ -598,103 +617,96 @@ public final class MicronautSourceLauncher {
     private static List<Path> writeTestSupportSources(Path workDir) throws IOException {
         Path sourceDir = Files.createDirectories(workDir.resolve("test-support-sources"));
         List<Path> sources = new ArrayList<>();
-        sources.add(writeSource(sourceDir, "io/micronaut/test/extensions/junit5/annotation/MicronautTest.java", """
-                package io.micronaut.test.extensions.junit5.annotation;
+        sources.add(writeSource(sourceDir, "io/crema/micronaut/test/SourceLauncherContextBuilder.java", """
+                package io.crema.micronaut.test;
 
-                import java.lang.annotation.ElementType;
-                import java.lang.annotation.Retention;
-                import java.lang.annotation.RetentionPolicy;
-                import java.lang.annotation.Target;
-                import org.junit.jupiter.api.extension.ExtendWith;
+                import io.micronaut.context.ApplicationContext;
+                import io.micronaut.context.DefaultApplicationContextBuilder;
+                import java.io.IOException;
+                import java.io.InputStream;
+                import java.lang.reflect.InvocationTargetException;
+                import java.nio.file.Files;
+                import java.nio.file.Path;
+                import java.util.HashMap;
+                import java.util.Map;
+                import java.util.Properties;
 
-                @Retention(RetentionPolicy.RUNTIME)
-                @Target(ElementType.TYPE)
-                @ExtendWith(SourceMicronautTestExtension.class)
-                public @interface MicronautTest {
-                }
-                """));
-        sources.add(writeSource(sourceDir, "io/micronaut/test/extensions/junit5/annotation/SourceMicronautTestExtension.java", """
-                package io.micronaut.test.extensions.junit5.annotation;
+                public final class SourceLauncherContextBuilder extends DefaultApplicationContextBuilder {
+                    private static final String CLASSES_DIR_PROPERTY = "micronaut.source.test.classes-dir";
+                    private static final String PROPERTIES_FILE_PROPERTY = "micronaut.source.test.properties-file";
 
-                import io.micronaut.http.client.HttpClient;
-                import io.micronaut.http.client.annotation.Client;
-                import jakarta.inject.Inject;
-                import java.lang.reflect.Field;
-                import java.net.URI;
-                import java.net.URL;
-                import java.util.ArrayList;
-                import java.util.List;
-                import org.junit.jupiter.api.extension.AfterEachCallback;
-                import org.junit.jupiter.api.extension.ExtensionContext;
-                import org.junit.jupiter.api.extension.ExtensionConfigurationException;
-                import org.junit.jupiter.api.extension.TestInstancePostProcessor;
-
-                final class SourceMicronautTestExtension implements TestInstancePostProcessor, AfterEachCallback {
-                    private static final ExtensionContext.Namespace NAMESPACE =
-                            ExtensionContext.Namespace.create(SourceMicronautTestExtension.class);
-
-                    @Override
-                    public void postProcessTestInstance(Object testInstance, ExtensionContext context) throws Exception {
-                        List<AutoCloseable> closeables = new ArrayList<>();
-                        for (Class<?> current = testInstance.getClass(); current != null; current = current.getSuperclass()) {
-                            for (Field field : current.getDeclaredFields()) {
-                                if (!field.isAnnotationPresent(Inject.class)) {
-                                    continue;
-                                }
-                                field.setAccessible(true);
-                                if (HttpClient.class.isAssignableFrom(field.getType())) {
-                                    HttpClient client = HttpClient.create(clientUrl(field));
-                                    closeables.add(client);
-                                    field.set(testInstance, client);
-                                } else {
-                                    throw new ExtensionConfigurationException(
-                                            "Only @Inject @Client HttpClient fields are supported by the source launcher test extension: "
-                                                    + field);
-                                }
-                            }
-                        }
-                        context.getStore(NAMESPACE).put(testInstance, closeables);
+                    public SourceLauncherContextBuilder() {
+                        classLoader(applicationClassLoader());
+                        properties(testProperties());
                     }
 
                     @Override
-                    public void afterEach(ExtensionContext context) throws Exception {
-                        Object testInstance = context.getRequiredTestInstance();
-                        @SuppressWarnings("unchecked")
-                        List<AutoCloseable> closeables = context.getStore(NAMESPACE).remove(testInstance, List.class);
-                        if (closeables == null) {
-                            return;
-                        }
-                        Exception failure = null;
-                        for (AutoCloseable closeable : closeables) {
-                            try {
-                                closeable.close();
-                            } catch (Exception e) {
-                                if (failure == null) {
-                                    failure = e;
-                                } else {
-                                    failure.addSuppressed(e);
-                                }
+                    public ApplicationContext build() {
+                        ApplicationContext context = super.build();
+                        addGeneratedBeanDefinitionReferences(context, applicationClassLoader(), classesDir());
+                        return context;
+                    }
+
+                    private static void addGeneratedBeanDefinitionReferences(
+                            ApplicationContext context,
+                            ClassLoader classLoader,
+                            Path classesDir
+                    ) {
+                        try {
+                            Class<?> bridge = Class.forName(
+                                    "io.micronaut.core.io.service.DynamicServiceLoaderBridge",
+                                    true,
+                                    SourceLauncherContextBuilder.class.getClassLoader()
+                            );
+                            bridge.getMethod(
+                                    "addGeneratedBeanDefinitionReferences",
+                                    ApplicationContext.class,
+                                    ClassLoader.class,
+                                    Path.class
+                            ).invoke(null, context, classLoader, classesDir);
+                        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException e) {
+                            throw new IllegalStateException("Cannot access source launcher service loader bridge.", e);
+                        } catch (InvocationTargetException e) {
+                            Throwable cause = e.getCause();
+                            if (cause instanceof RuntimeException runtimeException) {
+                                throw runtimeException;
                             }
-                        }
-                        if (failure != null) {
-                            throw failure;
+                            if (cause instanceof Error error) {
+                                throw error;
+                            }
+                            throw new IllegalStateException("Source launcher service loader bridge failed.", cause);
                         }
                     }
 
-                    private static URL clientUrl(Field field) throws Exception {
-                        String baseUrl = System.getProperty("micronaut.source.test.url");
-                        if (baseUrl == null || baseUrl.isBlank()) {
-                            throw new ExtensionConfigurationException("Missing micronaut.source.test.url");
+                    private static ClassLoader applicationClassLoader() {
+                        return Thread.currentThread().getContextClassLoader();
+                    }
+
+                    private static Path classesDir() {
+                        String value = System.getProperty(CLASSES_DIR_PROPERTY);
+                        if (value == null || value.isBlank()) {
+                            throw new IllegalStateException("Missing system property: " + CLASSES_DIR_PROPERTY);
                         }
-                        Client client = field.getAnnotation(Client.class);
-                        if (client == null || client.value().isBlank() || "/".equals(client.value())) {
-                            return URI.create(baseUrl).toURL();
+                        return Path.of(value);
+                    }
+
+                    private static Map<String, Object> testProperties() {
+                        String file = System.getProperty(PROPERTIES_FILE_PROPERTY);
+                        if (file == null || file.isBlank()) {
+                            throw new IllegalStateException("Missing system property: " + PROPERTIES_FILE_PROPERTY);
                         }
-                        String value = client.value();
-                        if (value.startsWith("http://") || value.startsWith("https://")) {
-                            return URI.create(value).toURL();
+                        Properties properties = new Properties();
+                        try (InputStream in = Files.newInputStream(Path.of(file))) {
+                            properties.load(in);
+                        } catch (IOException e) {
+                            throw new IllegalStateException("Cannot read source launcher test properties: " + file, e);
                         }
-                        return URI.create(baseUrl).resolve(value.startsWith("/") ? value.substring(1) : value).toURL();
+
+                        Map<String, Object> result = new HashMap<>();
+                        for (String name : properties.stringPropertyNames()) {
+                            result.put(name, properties.getProperty(name));
+                        }
+                        return result;
                     }
                 }
                 """));
@@ -715,7 +727,8 @@ public final class MicronautSourceLauncher {
             Path classesDir,
             InMemoryClassPath launcherClasspath,
             List<Path> dependencyClasspath,
-            List<String> annotationPatterns
+            List<String> annotationPatterns,
+            List<String> testAnnotationPatterns
     ) throws IOException {
         compile(sourceFiles, classesDir, launcherClasspath, annotationPatterns, true, dependencyClasspath);
         if (!testSourceFiles.isEmpty()) {
@@ -725,7 +738,7 @@ public final class MicronautSourceLauncher {
             List<Path> testClassPath = new ArrayList<>(dependencyClasspath.size() + 1);
             testClassPath.add(classesDir);
             testClassPath.addAll(dependencyClasspath);
-            compile(testCompileSourceFiles, classesDir, launcherClasspath, List.of(), false, testClassPath);
+            compile(testCompileSourceFiles, classesDir, launcherClasspath, testAnnotationPatterns, true, testClassPath);
         }
     }
 
@@ -804,20 +817,11 @@ public final class MicronautSourceLauncher {
             StartupTimings timings
     ) throws Exception {
         long phaseStartNanos = System.nanoTime();
-        List<URL> urls = new ArrayList<>(1 + dependencyClasspath.size());
-        urls.add(classesDir.toUri().toURL());
-        for (Path dependency : dependencyClasspath) {
-            urls.add(dependency.toUri().toURL());
-        }
-
-        URLClassLoader applicationClassLoader = new URLClassLoader(urls.toArray(URL[]::new), MicronautSourceLauncher.class.getClassLoader());
+        URLClassLoader applicationClassLoader = applicationClassLoader(classesDir, dependencyClasspath);
         Thread.currentThread().setContextClassLoader(applicationClassLoader);
         timings.record("server classloader setup", phaseStartNanos);
 
-        Map<String, Object> properties = new HashMap<>();
-        properties.put("micronaut.application.name", "micronaut-source-demo");
-        properties.putAll(launchProperties);
-        properties.put("micronaut.server.port", port);
+        Map<String, Object> properties = launchProperties(port, launchProperties);
 
         ApplicationContextBuilder builder = ApplicationContext.builder()
                 .classLoader(applicationClassLoader)
@@ -837,17 +841,50 @@ public final class MicronautSourceLauncher {
         return new StartedServer(server, applicationClassLoader, context);
     }
 
-    private static int runTests(List<Path> testSourceFiles, StartedServer startedServer) throws Exception {
-        List<Class<?>> testClasses = new ArrayList<>();
-        for (Path testSourceFile : testSourceFiles) {
-            testClasses.add(Class.forName(binaryName(testSourceFile), true, startedServer.applicationClassLoader()));
+    private static URLClassLoader applicationClassLoader(Path classesDir, List<Path> dependencyClasspath) throws IOException {
+        List<URL> urls = new ArrayList<>(1 + dependencyClasspath.size());
+        urls.add(classesDir.toUri().toURL());
+        for (Path dependency : dependencyClasspath) {
+            urls.add(dependency.toUri().toURL());
         }
+        return new URLClassLoader(urls.toArray(URL[]::new), MicronautSourceLauncher.class.getClassLoader());
+    }
 
-        String oldTestUrl = System.getProperty("micronaut.source.test.url");
+    private static Map<String, Object> launchProperties(int port, Map<String, Object> launchProperties) {
+        Map<String, Object> properties = new HashMap<>();
+        properties.put("micronaut.application.name", "micronaut-source-demo");
+        properties.putAll(launchProperties);
+        properties.put("micronaut.server.port", port);
+        return properties;
+    }
+
+    private static int runTests(
+            List<Path> testSourceFiles,
+            Path classesDir,
+            List<Path> dependencyClasspath,
+            Path workDir,
+            int port,
+            Map<String, Object> launchProperties,
+            StartupTimings timings
+    ) throws Exception {
+        long phaseStartNanos = System.nanoTime();
+        URLClassLoader applicationClassLoader = applicationClassLoader(classesDir, dependencyClasspath);
         ClassLoader oldContextClassLoader = Thread.currentThread().getContextClassLoader();
-        Thread.currentThread().setContextClassLoader(startedServer.applicationClassLoader());
-        System.setProperty("micronaut.source.test.url", startedServer.server().getURL().toString());
+        Thread.currentThread().setContextClassLoader(applicationClassLoader);
+        timings.record("test classloader setup", phaseStartNanos);
+
+        Path testPropertiesFile = writeTestProperties(workDir, port, launchProperties);
+        String oldClassesDir = System.getProperty(TEST_CLASSES_DIR_PROPERTY);
+        String oldPropertiesFile = System.getProperty(TEST_PROPERTIES_FILE_PROPERTY);
+        System.setProperty(TEST_CLASSES_DIR_PROPERTY, classesDir.toString());
+        System.setProperty(TEST_PROPERTIES_FILE_PROPERTY, testPropertiesFile.toString());
         try {
+            List<Class<?>> testClasses = new ArrayList<>();
+            for (Path testSourceFile : testSourceFiles) {
+                testClasses.add(Class.forName(binaryName(testSourceFile), true, applicationClassLoader));
+            }
+
+            phaseStartNanos = System.nanoTime();
             LauncherDiscoveryRequest request = LauncherDiscoveryRequestBuilder.request()
                     .selectors(testClasses.stream().map(DiscoverySelectors::selectClass).toList())
                     .build();
@@ -861,6 +898,7 @@ public final class MicronautSourceLauncher {
                     .build());
             SummaryGeneratingListener summaryListener = new SummaryGeneratingListener();
             launcher.execute(request, summaryListener, new ConsoleTestExecutionListener());
+            timings.record("junit execution", phaseStartNanos);
             TestExecutionSummary summary = summaryListener.getSummary();
             if (summary.getTestsFoundCount() == 0) {
                 System.out.println("No source tests found.");
@@ -873,11 +911,27 @@ public final class MicronautSourceLauncher {
             return Math.toIntExact(summary.getTestsFailedCount());
         } finally {
             Thread.currentThread().setContextClassLoader(oldContextClassLoader);
-            if (oldTestUrl == null) {
-                System.clearProperty("micronaut.source.test.url");
-            } else {
-                System.setProperty("micronaut.source.test.url", oldTestUrl);
-            }
+            restoreSystemProperty(TEST_CLASSES_DIR_PROPERTY, oldClassesDir);
+            restoreSystemProperty(TEST_PROPERTIES_FILE_PROPERTY, oldPropertiesFile);
+            applicationClassLoader.close();
+        }
+    }
+
+    private static Path writeTestProperties(Path workDir, int port, Map<String, Object> launchProperties) throws IOException {
+        Properties properties = new Properties();
+        launchProperties(port, launchProperties).forEach((key, value) -> properties.setProperty(key, String.valueOf(value)));
+        Path file = workDir.resolve("test-runtime.properties");
+        try (var out = Files.newOutputStream(file)) {
+            properties.store(out, "Micronaut source launcher test properties");
+        }
+        return file;
+    }
+
+    private static void restoreSystemProperty(String key, String oldValue) {
+        if (oldValue == null) {
+            System.clearProperty(key);
+        } else {
+            System.setProperty(key, oldValue);
         }
     }
 

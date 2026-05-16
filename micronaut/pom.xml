@@ -72,6 +72,10 @@
             <artifactId>micronaut-validation-processor</artifactId>
         </dependency>
         <dependency>
+            <groupId>io.micronaut.test</groupId>
+            <artifactId>micronaut-test-junit5</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.apache.maven</groupId>
             <artifactId>maven-resolver-provider</artifactId>
             <version>${maven.resolver.provider.version}</version>

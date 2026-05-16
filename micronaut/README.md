@@ -159,16 +159,17 @@ Expected response:
 
 ## Source Tests
 
-The launcher can also run a small Micronaut-style source test. Test mode
-compiles the application sources and test sources, starts the Micronaut server,
-injects `@Client("/") HttpClient` fields, and runs the tests through the real
-JUnit Platform launcher and Jupiter engine. For this demo, `@MicronautTest` is
-a small launcher-provided adapter that wires the running source-launched server
-into JUnit; the JUnit annotations and assertions are the real JUnit API.
+The launcher can also run source tests with real Micronaut Test. Test mode
+compiles the application sources and test sources with Micronaut annotation
+processing, then runs them through the real JUnit Platform launcher, Jupiter
+engine, and `@MicronautTest` extension. The source launcher supplies only a
+custom `ApplicationContextBuilder` so Micronaut Test can start and stop the
+source-launched application context through its normal lifecycle.
 
 ```java
 package examples.hello;
 
+import io.crema.micronaut.test.SourceLauncherContextBuilder;
 import io.micronaut.http.client.HttpClient;
 import io.micronaut.http.client.annotation.Client;
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
@@ -177,7 +178,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@MicronautTest
+@MicronautTest(contextBuilder = SourceLauncherContextBuilder.class)
 final class HelloControllerTest {
     @Inject
     @Client("/")
