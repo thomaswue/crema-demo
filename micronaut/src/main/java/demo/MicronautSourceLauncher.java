@@ -38,6 +38,12 @@ import org.junit.platform.launcher.core.LauncherDiscoveryRequestBuilder;
 import org.junit.platform.launcher.core.LauncherFactory;
 import org.junit.platform.launcher.listeners.SummaryGeneratingListener;
 import org.junit.platform.launcher.listeners.TestExecutionSummary;
+import org.objectweb.asm.AnnotationVisitor;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassVisitor;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
 
 import javax.annotation.processing.Processor;
 import javax.tools.Diagnostic;
@@ -58,15 +64,20 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.URI;
 import java.net.URL;
 import java.net.URLClassLoader;
+import java.net.URLConnection;
+import java.net.URLStreamHandler;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -74,7 +85,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Properties;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -87,8 +97,8 @@ import org.w3c.dom.Node;
 public final class MicronautSourceLauncher {
     private static final String LIB_INDEX = "launcher-libs.index";
     private static final String DEFAULT_DEPS_FILE = "deps.yml";
-    private static final String TEST_CLASSES_DIR_PROPERTY = "micronaut.source.test.classes-dir";
-    private static final String TEST_PROPERTIES_FILE_PROPERTY = "micronaut.source.test.properties-file";
+    private static final String SOURCE_LAUNCHER_CONTEXT_BUILDER = "io.crema.micronaut.test.SourceLauncherContextBuilder";
+    private static final String MICRONAUT_TEST_DESCRIPTOR = "Lio/micronaut/test/extensions/junit5/annotation/MicronautTest;";
     private static final Pattern PACKAGE_DECLARATION = Pattern.compile(
             "(?m)^\\s*package\\s+([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)\\s*;"
     );
@@ -111,9 +121,7 @@ public final class MicronautSourceLauncher {
                 ? annotationPatterns(concat(sourceFiles, testSourceFiles), options.annotationPatterns())
                 : List.of();
 
-        Path workDir = Files.createTempDirectory("micronaut-source-launcher-");
-        Path classesDir = Files.createDirectories(workDir.resolve("classes"));
-        List<Path> testSupportSourceFiles = options.test() ? writeTestSupportSources(workDir) : List.of();
+        List<JavaFileObject> testSupportSourceFiles = options.test() ? testSupportSources() : List.of();
         StartupTimings timings = new StartupTimings(options.timings());
         timings.record("setup", processStartNanos);
 
@@ -125,11 +133,10 @@ public final class MicronautSourceLauncher {
         InMemoryClassPath launcherClasspath = InMemoryClassPath.fromLauncherResources();
         timings.record("index launcher libs", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
-        compileApplicationAndTests(
+        InMemoryCompilationOutput compiledOutput = compileApplicationAndTests(
                 sourceFiles,
                 testSourceFiles,
                 testSupportSourceFiles,
-                classesDir,
                 launcherClasspath,
                 dependencyClasspath,
                 annotationPatterns,
@@ -137,14 +144,14 @@ public final class MicronautSourceLauncher {
         );
         timings.record("javac and annotation processing", phaseStartNanos);
         if (options.test()) {
-            int failures = runTests(testSourceFiles, classesDir, dependencyClasspath, workDir, options.port(), options.properties(), timings);
+            int failures = runTests(testSourceFiles, compiledOutput, dependencyClasspath, options.port(), options.properties(), timings);
             timings.print();
             System.exit(failures > 0 ? 1 : 0);
             return;
         }
 
         phaseStartNanos = System.nanoTime();
-        StartedServer startedServer = startServer(classesDir, dependencyClasspath, options.port(), options.properties(), timings);
+        StartedServer startedServer = startServer(compiledOutput, dependencyClasspath, options.port(), options.properties(), timings);
         timings.record("server setup total", phaseStartNanos);
         long elapsedMillis = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
 
@@ -614,27 +621,16 @@ public final class MicronautSourceLauncher {
         return packageName(source);
     }
 
-    private static List<Path> writeTestSupportSources(Path workDir) throws IOException {
-        Path sourceDir = Files.createDirectories(workDir.resolve("test-support-sources"));
-        List<Path> sources = new ArrayList<>();
-        sources.add(writeSource(sourceDir, "io/crema/micronaut/test/SourceLauncherContextBuilder.java", """
+    private static List<JavaFileObject> testSupportSources() {
+        return List.of(sourceFile("io.crema.micronaut.test.SourceLauncherContextBuilder", """
                 package io.crema.micronaut.test;
 
                 import io.micronaut.context.ApplicationContext;
                 import io.micronaut.context.DefaultApplicationContextBuilder;
-                import java.io.IOException;
-                import java.io.InputStream;
                 import java.lang.reflect.InvocationTargetException;
-                import java.nio.file.Files;
-                import java.nio.file.Path;
-                import java.util.HashMap;
                 import java.util.Map;
-                import java.util.Properties;
 
                 public final class SourceLauncherContextBuilder extends DefaultApplicationContextBuilder {
-                    private static final String CLASSES_DIR_PROPERTY = "micronaut.source.test.classes-dir";
-                    private static final String PROPERTIES_FILE_PROPERTY = "micronaut.source.test.properties-file";
-
                     public SourceLauncherContextBuilder() {
                         classLoader(applicationClassLoader());
                         properties(testProperties());
@@ -643,14 +639,13 @@ public final class MicronautSourceLauncher {
                     @Override
                     public ApplicationContext build() {
                         ApplicationContext context = super.build();
-                        addGeneratedBeanDefinitionReferences(context, applicationClassLoader(), classesDir());
+                        addGeneratedBeanDefinitionReferences(context, applicationClassLoader());
                         return context;
                     }
 
                     private static void addGeneratedBeanDefinitionReferences(
                             ApplicationContext context,
-                            ClassLoader classLoader,
-                            Path classesDir
+                            ClassLoader classLoader
                     ) {
                         try {
                             Class<?> bridge = Class.forName(
@@ -661,9 +656,8 @@ public final class MicronautSourceLauncher {
                             bridge.getMethod(
                                     "addGeneratedBeanDefinitionReferences",
                                     ApplicationContext.class,
-                                    ClassLoader.class,
-                                    Path.class
-                            ).invoke(null, context, classLoader, classesDir);
+                                    ClassLoader.class
+                            ).invoke(null, context, classLoader);
                         } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException e) {
                             throw new IllegalStateException("Cannot access source launcher service loader bridge.", e);
                         } catch (InvocationTargetException e) {
@@ -682,69 +676,108 @@ public final class MicronautSourceLauncher {
                         return Thread.currentThread().getContextClassLoader();
                     }
 
-                    private static Path classesDir() {
-                        String value = System.getProperty(CLASSES_DIR_PROPERTY);
-                        if (value == null || value.isBlank()) {
-                            throw new IllegalStateException("Missing system property: " + CLASSES_DIR_PROPERTY);
-                        }
-                        return Path.of(value);
-                    }
-
+                    @SuppressWarnings("unchecked")
                     private static Map<String, Object> testProperties() {
-                        String file = System.getProperty(PROPERTIES_FILE_PROPERTY);
-                        if (file == null || file.isBlank()) {
-                            throw new IllegalStateException("Missing system property: " + PROPERTIES_FILE_PROPERTY);
+                        try {
+                            Class<?> bridge = Class.forName(
+                                    "io.micronaut.core.io.service.DynamicServiceLoaderBridge",
+                                    true,
+                                    SourceLauncherContextBuilder.class.getClassLoader()
+                            );
+                            return (Map<String, Object>) bridge.getMethod("sourceLauncherTestProperties").invoke(null);
+                        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException e) {
+                            throw new IllegalStateException("Cannot access source launcher test properties.", e);
+                        } catch (InvocationTargetException e) {
+                            Throwable cause = e.getCause();
+                            if (cause instanceof RuntimeException runtimeException) {
+                                throw runtimeException;
+                            }
+                            if (cause instanceof Error error) {
+                                throw error;
+                            }
+                            throw new IllegalStateException("Cannot read source launcher test properties.", cause);
                         }
-                        Properties properties = new Properties();
-                        try (InputStream in = Files.newInputStream(Path.of(file))) {
-                            properties.load(in);
-                        } catch (IOException e) {
-                            throw new IllegalStateException("Cannot read source launcher test properties: " + file, e);
-                        }
-
-                        Map<String, Object> result = new HashMap<>();
-                        for (String name : properties.stringPropertyNames()) {
-                            result.put(name, properties.getProperty(name));
-                        }
-                        return result;
                     }
                 }
                 """));
-        return sources;
     }
 
-    private static Path writeSource(Path sourceDir, String relativePath, String source) throws IOException {
-        Path target = sourceDir.resolve(relativePath);
-        Files.createDirectories(target.getParent());
-        Files.writeString(target, source, StandardCharsets.UTF_8);
-        return target;
+    private static JavaFileObject sourceFile(String binaryName, String source) {
+        return new InMemorySourceFile(binaryName, source);
     }
 
-    private static void compileApplicationAndTests(
+    private static InMemoryCompilationOutput compileApplicationAndTests(
             List<Path> sourceFiles,
             List<Path> testSourceFiles,
-            List<Path> testSupportSourceFiles,
-            Path classesDir,
+            List<JavaFileObject> testSupportSourceFiles,
             InMemoryClassPath launcherClasspath,
             List<Path> dependencyClasspath,
             List<String> annotationPatterns,
             List<String> testAnnotationPatterns
     ) throws IOException {
-        compile(sourceFiles, classesDir, launcherClasspath, annotationPatterns, true, dependencyClasspath);
+        InMemoryCompilationOutput output = new InMemoryCompilationOutput();
+        compile(sourceFiles, List.of(), output, launcherClasspath, annotationPatterns, true, dependencyClasspath);
         if (!testSourceFiles.isEmpty()) {
-            List<Path> testCompileSourceFiles = new ArrayList<>(testSupportSourceFiles.size() + testSourceFiles.size());
-            testCompileSourceFiles.addAll(testSupportSourceFiles);
-            testCompileSourceFiles.addAll(testSourceFiles);
-            List<Path> testClassPath = new ArrayList<>(dependencyClasspath.size() + 1);
-            testClassPath.add(classesDir);
-            testClassPath.addAll(dependencyClasspath);
-            compile(testCompileSourceFiles, classesDir, launcherClasspath, testAnnotationPatterns, true, testClassPath);
+            compile(testSourceFiles, testSupportSourceFiles, output, launcherClasspath, testAnnotationPatterns, true, dependencyClasspath);
+            addSourceLauncherContextBuilderToMicronautTests(output);
         }
+        return output.snapshot();
+    }
+
+    private static void addSourceLauncherContextBuilderToMicronautTests(InMemoryCompilationOutput output) {
+        output.transformClasses((binaryName, bytes) -> addSourceLauncherContextBuilderToMicronautTest(binaryName, bytes));
+    }
+
+    private static byte[] addSourceLauncherContextBuilderToMicronautTest(String binaryName, byte[] bytes) {
+        ClassReader reader = new ClassReader(bytes);
+        ClassWriter writer = new ClassWriter(reader, 0);
+        boolean[] changed = {false};
+        reader.accept(new ClassVisitor(Opcodes.ASM9, writer) {
+            @Override
+            public AnnotationVisitor visitAnnotation(String descriptor, boolean visible) {
+                AnnotationVisitor delegate = super.visitAnnotation(descriptor, visible);
+                if (!MICRONAUT_TEST_DESCRIPTOR.equals(descriptor)) {
+                    return delegate;
+                }
+                return new AnnotationVisitor(Opcodes.ASM9, delegate) {
+                    private boolean hasContextBuilder;
+
+                    @Override
+                    public void visit(String name, Object value) {
+                        if ("contextBuilder".equals(name)) {
+                            hasContextBuilder = true;
+                        }
+                        super.visit(name, value);
+                    }
+
+                    @Override
+                    public AnnotationVisitor visitArray(String name) {
+                        if ("contextBuilder".equals(name)) {
+                            hasContextBuilder = true;
+                        }
+                        return super.visitArray(name);
+                    }
+
+                    @Override
+                    public void visitEnd() {
+                        if (!hasContextBuilder) {
+                            AnnotationVisitor array = super.visitArray("contextBuilder");
+                            array.visit(null, Type.getType("L" + SOURCE_LAUNCHER_CONTEXT_BUILDER.replace('.', '/') + ";"));
+                            array.visitEnd();
+                            changed[0] = true;
+                        }
+                        super.visitEnd();
+                    }
+                };
+            }
+        }, 0);
+        return changed[0] ? writer.toByteArray() : bytes;
     }
 
     private static void compile(
             List<Path> sourceFiles,
-            Path classesDir,
+            List<JavaFileObject> additionalSources,
+            InMemoryCompilationOutput output,
             InMemoryClassPath launcherClasspath,
             List<String> annotationPatterns,
             boolean annotationProcessing,
@@ -756,7 +789,6 @@ public final class MicronautSourceLauncher {
         }
 
         List<String> compilerOptions = new ArrayList<>(List.of(
-                "-d", classesDir.toString(),
                 "-parameters",
                 annotationProcessing ? "-proc:full" : "-proc:none"
         ));
@@ -771,11 +803,12 @@ public final class MicronautSourceLauncher {
         DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
         try (StandardJavaFileManager standardFileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
             standardFileManager.setLocationFromPaths(StandardLocation.ANNOTATION_PROCESSOR_PATH, List.of());
-            JavaFileManager fileManager = standardFileManager;
             standardFileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, additionalClassPath);
-            fileManager = new InMemoryClassPathFileManager(standardFileManager, launcherClasspath);
+            JavaFileManager fileManager = new InMemoryClassPathFileManager(standardFileManager, launcherClasspath, output);
 
-            Iterable<? extends JavaFileObject> files = standardFileManager.getJavaFileObjectsFromPaths(sourceFiles);
+            List<JavaFileObject> files = new ArrayList<>(sourceFiles.size() + additionalSources.size());
+            standardFileManager.getJavaFileObjectsFromPaths(sourceFiles).forEach(files::add);
+            files.addAll(additionalSources);
             JavaCompiler.CompilationTask task = compiler.getTask(null, fileManager, diagnostics, compilerOptions, null, files);
             if (annotationProcessing) {
                 task.setProcessors(micronautProcessors());
@@ -810,14 +843,14 @@ public final class MicronautSourceLauncher {
     }
 
     private static StartedServer startServer(
-            Path classesDir,
+            InMemoryCompilationOutput compiledOutput,
             List<Path> dependencyClasspath,
             int port,
             Map<String, Object> launchProperties,
             StartupTimings timings
     ) throws Exception {
         long phaseStartNanos = System.nanoTime();
-        URLClassLoader applicationClassLoader = applicationClassLoader(classesDir, dependencyClasspath);
+        MemoryApplicationClassLoader applicationClassLoader = applicationClassLoader(compiledOutput, dependencyClasspath);
         Thread.currentThread().setContextClassLoader(applicationClassLoader);
         timings.record("server classloader setup", phaseStartNanos);
 
@@ -830,7 +863,7 @@ public final class MicronautSourceLauncher {
         ApplicationContext context = builder.build();
         timings.record("application context build", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
-        DynamicServiceLoaderBridge.addGeneratedBeanDefinitionReferences(context, applicationClassLoader, classesDir);
+        DynamicServiceLoaderBridge.addGeneratedBeanDefinitionReferences(context, applicationClassLoader);
         timings.record("load generated bean references", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
         context.start();
@@ -841,13 +874,15 @@ public final class MicronautSourceLauncher {
         return new StartedServer(server, applicationClassLoader, context);
     }
 
-    private static URLClassLoader applicationClassLoader(Path classesDir, List<Path> dependencyClasspath) throws IOException {
-        List<URL> urls = new ArrayList<>(1 + dependencyClasspath.size());
-        urls.add(classesDir.toUri().toURL());
+    private static MemoryApplicationClassLoader applicationClassLoader(
+            InMemoryCompilationOutput compiledOutput,
+            List<Path> dependencyClasspath
+    ) throws IOException {
+        List<URL> urls = new ArrayList<>(dependencyClasspath.size());
         for (Path dependency : dependencyClasspath) {
             urls.add(dependency.toUri().toURL());
         }
-        return new URLClassLoader(urls.toArray(URL[]::new), MicronautSourceLauncher.class.getClassLoader());
+        return new MemoryApplicationClassLoader(urls.toArray(URL[]::new), MicronautSourceLauncher.class.getClassLoader(), compiledOutput);
     }
 
     private static Map<String, Object> launchProperties(int port, Map<String, Object> launchProperties) {
@@ -860,24 +895,19 @@ public final class MicronautSourceLauncher {
 
     private static int runTests(
             List<Path> testSourceFiles,
-            Path classesDir,
+            InMemoryCompilationOutput compiledOutput,
             List<Path> dependencyClasspath,
-            Path workDir,
             int port,
             Map<String, Object> launchProperties,
             StartupTimings timings
     ) throws Exception {
         long phaseStartNanos = System.nanoTime();
-        URLClassLoader applicationClassLoader = applicationClassLoader(classesDir, dependencyClasspath);
+        MemoryApplicationClassLoader applicationClassLoader = applicationClassLoader(compiledOutput, dependencyClasspath);
         ClassLoader oldContextClassLoader = Thread.currentThread().getContextClassLoader();
         Thread.currentThread().setContextClassLoader(applicationClassLoader);
         timings.record("test classloader setup", phaseStartNanos);
 
-        Path testPropertiesFile = writeTestProperties(workDir, port, launchProperties);
-        String oldClassesDir = System.getProperty(TEST_CLASSES_DIR_PROPERTY);
-        String oldPropertiesFile = System.getProperty(TEST_PROPERTIES_FILE_PROPERTY);
-        System.setProperty(TEST_CLASSES_DIR_PROPERTY, classesDir.toString());
-        System.setProperty(TEST_PROPERTIES_FILE_PROPERTY, testPropertiesFile.toString());
+        DynamicServiceLoaderBridge.configureSourceLauncherTestProperties(launchProperties(port, launchProperties));
         try {
             List<Class<?>> testClasses = new ArrayList<>();
             for (Path testSourceFile : testSourceFiles) {
@@ -911,35 +941,20 @@ public final class MicronautSourceLauncher {
             return Math.toIntExact(summary.getTestsFailedCount());
         } finally {
             Thread.currentThread().setContextClassLoader(oldContextClassLoader);
-            restoreSystemProperty(TEST_CLASSES_DIR_PROPERTY, oldClassesDir);
-            restoreSystemProperty(TEST_PROPERTIES_FILE_PROPERTY, oldPropertiesFile);
+            DynamicServiceLoaderBridge.clearSourceLauncherTestProperties();
             applicationClassLoader.close();
-        }
-    }
-
-    private static Path writeTestProperties(Path workDir, int port, Map<String, Object> launchProperties) throws IOException {
-        Properties properties = new Properties();
-        launchProperties(port, launchProperties).forEach((key, value) -> properties.setProperty(key, String.valueOf(value)));
-        Path file = workDir.resolve("test-runtime.properties");
-        try (var out = Files.newOutputStream(file)) {
-            properties.store(out, "Micronaut source launcher test properties");
-        }
-        return file;
-    }
-
-    private static void restoreSystemProperty(String key, String oldValue) {
-        if (oldValue == null) {
-            System.clearProperty(key);
-        } else {
-            System.setProperty(key, oldValue);
         }
     }
 
     private static String binaryName(Path sourceFile) throws IOException {
         String source = Files.readString(sourceFile, StandardCharsets.UTF_8);
+        return binaryName(source);
+    }
+
+    private static String binaryName(String source) {
         var classMatcher = TOP_LEVEL_CLASS_DECLARATION.matcher(source);
         if (!classMatcher.find()) {
-            throw new IllegalArgumentException("No top-level class found in test source: " + sourceFile);
+            throw new IllegalArgumentException("No top-level class found in source.");
         }
         Optional<String> packageName = packageName(source);
         return packageName.map(value -> value + "." + classMatcher.group(1)).orElse(classMatcher.group(1));
@@ -1000,6 +1015,165 @@ public final class MicronautSourceLauncher {
                 System.out.println(line);
             }
         }
+    }
+
+    private static final class MemoryApplicationClassLoader extends URLClassLoader
+            implements DynamicServiceLoaderBridge.GeneratedServiceProvider {
+        private final InMemoryCompilationOutput output;
+
+        private MemoryApplicationClassLoader(URL[] urls, ClassLoader parent, InMemoryCompilationOutput output) {
+            super(urls, parent);
+            this.output = output;
+        }
+
+        @Override
+        protected Class<?> findClass(String name) throws ClassNotFoundException {
+            byte[] bytes = output.classBytes(name);
+            if (bytes != null) {
+                return defineClass(name, bytes, 0, bytes.length);
+            }
+            return super.findClass(name);
+        }
+
+        @Override
+        public URL getResource(String name) {
+            URL resource = output.resourceUrl(name);
+            return resource != null ? resource : super.getResource(name);
+        }
+
+        @Override
+        public Enumeration<URL> getResources(String name) throws IOException {
+            List<URL> result = new ArrayList<>();
+            URL resource = output.resourceUrl(name);
+            if (resource != null) {
+                result.add(resource);
+            }
+            super.getResources(name).asIterator().forEachRemaining(result::add);
+            return Collections.enumeration(result);
+        }
+
+        @Override
+        public List<String> generatedMicronautServiceClassNames(String serviceName) {
+            return output.generatedMicronautServiceClassNames(serviceName);
+        }
+    }
+
+    private static final class InMemoryCompilationOutput {
+        private final Map<String, byte[]> classes;
+        private final Map<String, byte[]> resources;
+
+        private InMemoryCompilationOutput() {
+            this(new HashMap<>(), new HashMap<>());
+        }
+
+        private InMemoryCompilationOutput(Map<String, byte[]> classes, Map<String, byte[]> resources) {
+            this.classes = classes;
+            this.resources = resources;
+        }
+
+        private synchronized InMemoryCompilationOutput snapshot() {
+            return new InMemoryCompilationOutput(copyBytes(classes), copyBytes(resources));
+        }
+
+        private static Map<String, byte[]> copyBytes(Map<String, byte[]> source) {
+            Map<String, byte[]> copy = new HashMap<>();
+            source.forEach((name, bytes) -> copy.put(name, bytes.clone()));
+            return Map.copyOf(copy);
+        }
+
+        private synchronized void putClass(String binaryName, byte[] bytes) {
+            classes.put(binaryName, bytes.clone());
+            resources.put(classResourceName(binaryName), bytes.clone());
+        }
+
+        private synchronized void putResource(String resourceName, byte[] bytes) {
+            resources.put(resourceName, bytes.clone());
+        }
+
+        private synchronized byte[] classBytes(String binaryName) {
+            byte[] bytes = classes.get(binaryName);
+            return bytes == null ? null : bytes.clone();
+        }
+
+        private synchronized byte[] resourceBytes(String resourceName) {
+            byte[] bytes = resources.get(resourceName);
+            return bytes == null ? null : bytes.clone();
+        }
+
+        private synchronized URL resourceUrl(String resourceName) {
+            byte[] bytes = resourceBytes(resourceName);
+            if (bytes == null) {
+                return null;
+            }
+            try {
+                return new URL(null, "memory:///" + resourceName, new URLStreamHandler() {
+                    @Override
+                    protected URLConnection openConnection(URL url) {
+                        return new URLConnection(url) {
+                            @Override
+                            public void connect() {
+                            }
+
+                            @Override
+                            public InputStream getInputStream() {
+                                return new ByteArrayInputStream(bytes);
+                            }
+                        };
+                    }
+                });
+            } catch (IOException e) {
+                throw new IllegalStateException("Cannot create in-memory resource URL: " + resourceName, e);
+            }
+        }
+
+        private synchronized List<MemoryOutputClassFile> list(String packageName, boolean recurse) {
+            String prefix = packageName.isEmpty() ? "" : packageName + ".";
+            List<MemoryOutputClassFile> result = new ArrayList<>();
+            classes.forEach((binaryName, bytes) -> {
+                String candidatePackage = InMemoryClassPath.packageName(binaryName);
+                if (candidatePackage.equals(packageName) || (recurse && candidatePackage.startsWith(prefix))) {
+                    result.add(new MemoryOutputClassFile(binaryName, bytes));
+                }
+            });
+            return result;
+        }
+
+        private synchronized MemoryOutputClassFile getClassFile(String binaryName) {
+            byte[] bytes = classes.get(binaryName);
+            return bytes == null ? null : new MemoryOutputClassFile(binaryName, bytes);
+        }
+
+        private synchronized MemoryOutputResourceFile getResourceFile(String resourceName) {
+            byte[] bytes = resources.get(resourceName);
+            return bytes == null ? null : new MemoryOutputResourceFile(resourceName, bytes);
+        }
+
+        private synchronized List<String> generatedMicronautServiceClassNames(String serviceName) {
+            String prefix = "META-INF/micronaut/" + serviceName + "/";
+            return resources.keySet().stream()
+                    .filter(name -> name.startsWith(prefix))
+                    .map(name -> name.substring(prefix.length()))
+                    .filter(name -> !name.isEmpty() && !name.contains("/"))
+                    .sorted()
+                    .toList();
+        }
+
+        private static String classResourceName(String binaryName) {
+            return binaryName.replace('.', '/') + ".class";
+        }
+
+        private synchronized void transformClasses(ClassTransformer transformer) {
+            List<String> binaryNames = new ArrayList<>(classes.keySet());
+            for (String binaryName : binaryNames) {
+                byte[] transformed = transformer.transform(binaryName, classes.get(binaryName).clone());
+                putClass(binaryName, transformed);
+            }
+        }
+    }
+
+    @FunctionalInterface
+    private interface ClassTransformer {
+        byte[] transform(String binaryName, byte[] bytes);
     }
 
     private static final class InMemoryClassPath {
@@ -1147,10 +1321,16 @@ public final class MicronautSourceLauncher {
 
     private static final class InMemoryClassPathFileManager extends ForwardingJavaFileManager<StandardJavaFileManager> {
         private final InMemoryClassPath classPath;
+        private final InMemoryCompilationOutput output;
 
-        private InMemoryClassPathFileManager(StandardJavaFileManager fileManager, InMemoryClassPath classPath) {
+        private InMemoryClassPathFileManager(
+                StandardJavaFileManager fileManager,
+                InMemoryClassPath classPath,
+                InMemoryCompilationOutput output
+        ) {
             super(fileManager);
             this.classPath = classPath;
+            this.output = output;
         }
 
         @Override
@@ -1161,6 +1341,7 @@ public final class MicronautSourceLauncher {
             }
 
             List<JavaFileObject> result = new ArrayList<>();
+            result.addAll(output.list(packageName, recurse));
             delegateFiles.forEach(result::add);
             result.addAll(classPath.list(packageName, recurse));
             return result;
@@ -1169,6 +1350,10 @@ public final class MicronautSourceLauncher {
         @Override
         public JavaFileObject getJavaFileForInput(Location location, String className, JavaFileObject.Kind kind) throws IOException {
             if (location == StandardLocation.CLASS_PATH && kind == JavaFileObject.Kind.CLASS) {
+                MemoryOutputClassFile outputFile = output.getClassFile(className);
+                if (outputFile != null) {
+                    return outputFile;
+                }
                 InMemoryClassFile file = classPath.get(className);
                 if (file != null) {
                     return file;
@@ -1179,15 +1364,88 @@ public final class MicronautSourceLauncher {
 
         @Override
         public FileObject getFileForInput(Location location, String packageName, String relativeName) throws IOException {
-            if (location == StandardLocation.CLASS_PATH && relativeName.endsWith(".class")) {
-                String simpleName = relativeName.substring(0, relativeName.length() - ".class".length()).replace('/', '.');
-                String binaryName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
-                InMemoryClassFile file = classPath.get(binaryName);
-                if (file != null) {
-                    return file;
+            if (location == StandardLocation.CLASS_PATH) {
+                String resourceName = resourceName(packageName, relativeName);
+                if (relativeName.endsWith(".class")) {
+                    String simpleName = relativeName.substring(0, relativeName.length() - ".class".length()).replace('/', '.');
+                    String binaryName = packageName.isEmpty() ? simpleName : packageName + "." + simpleName;
+                    MemoryOutputClassFile outputFile = output.getClassFile(binaryName);
+                    if (outputFile != null) {
+                        return outputFile;
+                    }
+                    InMemoryClassFile file = classPath.get(binaryName);
+                    if (file != null) {
+                        return file;
+                    }
+                }
+
+                MemoryOutputResourceFile resource = output.getResourceFile(resourceName);
+                if (resource != null) {
+                    return resource;
                 }
             }
             return super.getFileForInput(location, packageName, relativeName);
+        }
+
+        @Override
+        public JavaFileObject getJavaFileForOutput(
+                Location location,
+                String className,
+                JavaFileObject.Kind kind,
+                FileObject sibling
+        ) throws IOException {
+            if (location == StandardLocation.CLASS_OUTPUT && kind == JavaFileObject.Kind.CLASS) {
+                return new WritableMemoryClassFile(className, output);
+            }
+            return super.getJavaFileForOutput(location, className, kind, sibling);
+        }
+
+        @Override
+        public JavaFileObject getJavaFileForOutputForOriginatingFiles(
+                Location location,
+                String className,
+                JavaFileObject.Kind kind,
+                FileObject... originatingFiles
+        ) throws IOException {
+            return getJavaFileForOutput(
+                    location,
+                    className,
+                    kind,
+                    originatingFiles.length == 0 ? null : originatingFiles[0]
+            );
+        }
+
+        @Override
+        public FileObject getFileForOutput(
+                Location location,
+                String packageName,
+                String relativeName,
+                FileObject sibling
+        ) throws IOException {
+            if (location == StandardLocation.CLASS_OUTPUT) {
+                return new WritableMemoryResourceFile(resourceName(packageName, relativeName), output);
+            }
+            return super.getFileForOutput(location, packageName, relativeName, sibling);
+        }
+
+        @Override
+        public FileObject getFileForOutputForOriginatingFiles(
+                Location location,
+                String packageName,
+                String relativeName,
+                FileObject... originatingFiles
+        ) throws IOException {
+            return getFileForOutput(
+                    location,
+                    packageName,
+                    relativeName,
+                    originatingFiles.length == 0 ? null : originatingFiles[0]
+            );
+        }
+
+        @Override
+        public boolean hasLocation(Location location) {
+            return location == StandardLocation.CLASS_OUTPUT || super.hasLocation(location);
         }
 
         @Override
@@ -1195,7 +1453,143 @@ public final class MicronautSourceLauncher {
             if (file instanceof InMemoryClassFile inMemoryClassFile) {
                 return inMemoryClassFile.binaryName();
             }
+            if (file instanceof MemoryOutputClassFile memoryOutputClassFile) {
+                return memoryOutputClassFile.binaryName();
+            }
             return super.inferBinaryName(location, file);
+        }
+
+        private static String resourceName(String packageName, String relativeName) {
+            if (packageName == null || packageName.isEmpty()) {
+                return relativeName;
+            }
+            return packageName.replace('.', '/') + "/" + relativeName;
+        }
+    }
+
+    private static final class InMemorySourceFile extends SimpleJavaFileObject {
+        private final String binaryName;
+        private final String source;
+
+        private InMemorySourceFile(String binaryName, String source) {
+            super(URI.create("mem:///source/" + binaryName.replace('.', '/') + ".java"), JavaFileObject.Kind.SOURCE);
+            this.binaryName = binaryName;
+            this.source = source;
+        }
+
+        @Override
+        public CharSequence getCharContent(boolean ignoreEncodingErrors) {
+            return source;
+        }
+
+        @Override
+        public String getName() {
+            return binaryName;
+        }
+    }
+
+    private static final class WritableMemoryClassFile extends SimpleJavaFileObject {
+        private final String binaryName;
+        private final InMemoryCompilationOutput output;
+        private byte[] bytes;
+
+        private WritableMemoryClassFile(String binaryName, InMemoryCompilationOutput output) {
+            super(URI.create("mem:///classes/" + binaryName.replace('.', '/') + ".class"), JavaFileObject.Kind.CLASS);
+            this.binaryName = binaryName;
+            this.output = output;
+        }
+
+        @Override
+        public OutputStream openOutputStream() {
+            return new ByteArrayOutputStream() {
+                @Override
+                public void close() throws IOException {
+                    super.close();
+                    bytes = toByteArray();
+                    output.putClass(binaryName, bytes);
+                }
+            };
+        }
+
+        @Override
+        public InputStream openInputStream() {
+            if (bytes == null) {
+                throw new IllegalStateException("Class has not been written yet: " + binaryName);
+            }
+            return new ByteArrayInputStream(bytes);
+        }
+    }
+
+    private static final class WritableMemoryResourceFile extends SimpleJavaFileObject {
+        private final String resourceName;
+        private final InMemoryCompilationOutput output;
+        private byte[] bytes;
+
+        private WritableMemoryResourceFile(String resourceName, InMemoryCompilationOutput output) {
+            super(URI.create("mem:///resources/" + resourceName), JavaFileObject.Kind.OTHER);
+            this.resourceName = resourceName;
+            this.output = output;
+        }
+
+        @Override
+        public OutputStream openOutputStream() {
+            return new ByteArrayOutputStream() {
+                @Override
+                public void close() throws IOException {
+                    super.close();
+                    bytes = toByteArray();
+                    output.putResource(resourceName, bytes);
+                }
+            };
+        }
+
+        @Override
+        public InputStream openInputStream() {
+            if (bytes == null) {
+                throw new IllegalStateException("Resource has not been written yet: " + resourceName);
+            }
+            return new ByteArrayInputStream(bytes);
+        }
+    }
+
+    private static final class MemoryOutputClassFile extends SimpleJavaFileObject {
+        private final String binaryName;
+        private final byte[] bytes;
+
+        private MemoryOutputClassFile(String binaryName, byte[] bytes) {
+            super(URI.create("mem:///classes/" + binaryName.replace('.', '/') + ".class"), JavaFileObject.Kind.CLASS);
+            this.binaryName = binaryName;
+            this.bytes = bytes.clone();
+        }
+
+        private String binaryName() {
+            return binaryName;
+        }
+
+        @Override
+        public InputStream openInputStream() {
+            return new ByteArrayInputStream(bytes);
+        }
+    }
+
+    private static final class MemoryOutputResourceFile extends SimpleJavaFileObject {
+        private final String resourceName;
+        private final byte[] bytes;
+
+        private MemoryOutputResourceFile(String resourceName, byte[] bytes) {
+            super(URI.create("mem:///resources/" + resourceName), JavaFileObject.Kind.OTHER);
+            this.resourceName = resourceName;
+            this.bytes = bytes.clone();
+        }
+
+        @Override
+        public InputStream openInputStream() {
+            return new ByteArrayInputStream(bytes);
+        }
+
+        @Override
+        public String getName() {
+            return resourceName;
         }
     }
 

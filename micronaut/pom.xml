@@ -20,6 +20,7 @@
         <maven.resolver.http.version>1.9.23</maven.resolver.http.version>
         <junit.jupiter.version>5.13.4</junit.jupiter.version>
         <junit.platform.version>1.13.4</junit.platform.version>
+        <asm.version>9.8</asm.version>
         <slf4j.version>2.0.17</slf4j.version>
     </properties>
 
@@ -74,6 +75,11 @@
         <dependency>
             <groupId>io.micronaut.test</groupId>
             <artifactId>micronaut-test-junit5</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.ow2.asm</groupId>
+            <artifactId>asm</artifactId>
+            <version>${asm.version}</version>
         </dependency>
         <dependency>
             <groupId>org.apache.maven</groupId>

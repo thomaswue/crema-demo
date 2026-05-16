@@ -22,8 +22,13 @@ import java.util.stream.Stream;
 public final class DynamicServiceLoaderBridge {
     private static final String BEAN_DEFINITION_REFERENCE = "io.micronaut.inject.BeanDefinitionReference";
     private static final String BEAN_INTROSPECTION_REFERENCE = "io.micronaut.core.beans.BeanIntrospectionReference";
+    private static Map<String, Object> sourceLauncherTestProperties = Map.of();
 
     private DynamicServiceLoaderBridge() {
+    }
+
+    public interface GeneratedServiceProvider {
+        List<String> generatedMicronautServiceClassNames(String serviceName);
     }
 
     public static void addGeneratedBeanDefinitionReferences(
@@ -31,16 +36,35 @@ public final class DynamicServiceLoaderBridge {
             ClassLoader classLoader,
             Path classesDir
     ) throws IOException {
-        addGeneratedBeanReferences(context, classLoader, classesDir);
-        addGeneratedIntrospectionReferences(classLoader, classesDir);
+        addGeneratedBeanReferences(context, classLoader, generatedServiceClassNames(classesDir, BEAN_DEFINITION_REFERENCE));
+        addGeneratedIntrospectionReferences(classLoader, generatedServiceClassNames(classesDir, BEAN_INTROSPECTION_REFERENCE));
+    }
+
+    public static void addGeneratedBeanDefinitionReferences(
+            ApplicationContext context,
+            ClassLoader classLoader
+    ) throws IOException {
+        addGeneratedBeanReferences(context, classLoader, generatedServiceClassNames(classLoader, BEAN_DEFINITION_REFERENCE));
+        addGeneratedIntrospectionReferences(classLoader, generatedServiceClassNames(classLoader, BEAN_INTROSPECTION_REFERENCE));
+    }
+
+    public static void configureSourceLauncherTestProperties(Map<String, Object> properties) {
+        sourceLauncherTestProperties = Map.copyOf(properties);
+    }
+
+    public static Map<String, Object> sourceLauncherTestProperties() {
+        return sourceLauncherTestProperties;
+    }
+
+    public static void clearSourceLauncherTestProperties() {
+        sourceLauncherTestProperties = Map.of();
     }
 
     private static void addGeneratedBeanReferences(
             ApplicationContext context,
             ClassLoader classLoader,
-            Path classesDir
+            List<String> generatedReferences
     ) throws IOException {
-        List<String> generatedReferences = generatedServiceClassNames(classesDir, BEAN_DEFINITION_REFERENCE);
         if (generatedReferences.isEmpty()) {
             return;
         }
@@ -65,8 +89,7 @@ public final class DynamicServiceLoaderBridge {
         setBeanDefinitionReferences(context, references);
     }
 
-    private static void addGeneratedIntrospectionReferences(ClassLoader classLoader, Path classesDir) throws IOException {
-        List<String> generatedReferences = generatedServiceClassNames(classesDir, BEAN_INTROSPECTION_REFERENCE);
+    private static void addGeneratedIntrospectionReferences(ClassLoader classLoader, List<String> generatedReferences) throws IOException {
         if (generatedReferences.isEmpty()) {
             return;
         }
@@ -89,6 +112,13 @@ public final class DynamicServiceLoaderBridge {
         }
 
         setBeanIntrospectionReferences(references);
+    }
+
+    private static List<String> generatedServiceClassNames(ClassLoader classLoader, String serviceName) {
+        if (classLoader instanceof GeneratedServiceProvider provider) {
+            return provider.generatedMicronautServiceClassNames(serviceName);
+        }
+        return List.of();
     }
 
     private static List<String> generatedServiceClassNames(Path classesDir, String serviceName) throws IOException {

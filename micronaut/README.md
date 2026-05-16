@@ -15,7 +15,10 @@ and Jackson support so guide-style examples can run from source.
 
 For the native launcher, embedded Micronaut and compiler dependencies are
 indexed from the image resources and served to `javac` through an in-memory file
-manager. No dependency jars are extracted to disk at startup.
+manager. Dynamically compiled application/test classes and Micronaut-generated
+service metadata are also captured in memory and loaded through the source
+application classloader. No dependency jars or generated class files are
+extracted to disk at startup.
 
 ## Requirements
 
@@ -162,14 +165,15 @@ Expected response:
 The launcher can also run source tests with real Micronaut Test. Test mode
 compiles the application sources and test sources with Micronaut annotation
 processing, then runs them through the real JUnit Platform launcher, Jupiter
-engine, and `@MicronautTest` extension. The source launcher supplies only a
-custom `ApplicationContextBuilder` so Micronaut Test can start and stop the
-source-launched application context through its normal lifecycle.
+engine, and `@MicronautTest` extension. Test sources can use plain
+`@MicronautTest`; after javac compiles the test class, the launcher adds its
+source-context builder to the in-memory annotation metadata so Micronaut Test can
+start and stop the source-launched application context through its normal
+lifecycle.
 
 ```java
 package examples.hello;
 
-import io.crema.micronaut.test.SourceLauncherContextBuilder;
 import io.micronaut.http.client.HttpClient;
 import io.micronaut.http.client.annotation.Client;
 import io.micronaut.test.extensions.junit5.annotation.MicronautTest;
@@ -178,7 +182,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-@MicronautTest(contextBuilder = SourceLauncherContextBuilder.class)
+@MicronautTest
 final class HelloControllerTest {
     @Inject
     @Client("/")
