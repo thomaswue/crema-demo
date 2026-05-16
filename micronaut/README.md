@@ -15,8 +15,7 @@ and Jackson support so guide-style examples can run from source.
 
 For the native launcher, embedded Micronaut and compiler dependencies are
 indexed from the image resources and served to `javac` through an in-memory file
-manager. The older disk extraction path is kept as a fallback for development
-and diagnostics.
+manager. No dependency jars are extracted to disk at startup.
 
 ## Requirements
 
@@ -44,8 +43,8 @@ To build a PGO-optimized launcher trained on the hello world controller:
 This first builds `./micronaut-profiled` with sampled PGO collection, then runs
 several fresh startup-only training launches against `examples/hello`. By
 default, each training launch is stopped immediately after the startup line is
-printed, so the collected profiles are biased toward source extraction, javac
-parsing and annotation processing, and Micronaut bootstrap rather than
+printed, so the collected profiles are biased toward launcher-library indexing,
+javac parsing and annotation processing, and Micronaut bootstrap rather than
 steady-state request handling. The script writes startup profiles under
 `target/pgo/` and then builds the final optimized `./micronaut` executable.
 
@@ -150,7 +149,7 @@ final class HelloControllerTest {
 Run the checked-in test from source:
 
 ```sh
-./micronaut --test examples/hello -- examples/hello-test
+./micronaut --test examples/hello -- tests/hello
 ```
 
 ## Examples
@@ -207,3 +206,8 @@ Native Image is configured to preserve `java.base` broadly, along with the
 compiler, Micronaut, validation, Jakarta, ASM, and JavaParser packages needed by
 runtime-loaded source applications. This makes the demo more flexible, at the
 cost of a larger native launcher.
+
+The launcher installs generated Micronaut bean definition and introspection
+references into the runtime context after compiling source files. That bridge is
+demo glue for this pinned Micronaut version, not a stable Micronaut extension
+point.
