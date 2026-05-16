@@ -46,7 +46,6 @@ import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -91,22 +90,10 @@ public final class MicronautSourceLauncher {
 
         long startNanos = System.nanoTime();
         long phaseStartNanos = System.nanoTime();
-        LauncherClasspath launcherClasspath = launcherClasspath(workDir);
-        timings.record(launcherClasspath.extracted() ? "extract launcher libs" : "index launcher libs", phaseStartNanos);
+        InMemoryClassPath launcherClasspath = InMemoryClassPath.fromLauncherResources();
+        timings.record("index launcher libs", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
-        try {
-            compileApplicationAndTests(sourceFiles, testSourceFiles, testSupportSourceFiles, classesDir, launcherClasspath, annotationPatterns);
-        } catch (RuntimeException | IOException e) {
-            if (launcherClasspath.extracted()) {
-                throw e;
-            }
-            timings.record("in-memory launcher libs failed: " + e.getClass().getSimpleName() + ": " + e.getMessage(), System.nanoTime());
-            long fallbackStartNanos = System.nanoTime();
-            LauncherClasspath extractedClasspath = extractedLauncherClasspath(workDir);
-            timings.record("fallback extract launcher libs", fallbackStartNanos);
-            compileApplicationAndTests(sourceFiles, testSourceFiles, testSupportSourceFiles, classesDir, extractedClasspath, annotationPatterns);
-            launcherClasspath = extractedClasspath;
-        }
+        compileApplicationAndTests(sourceFiles, testSourceFiles, testSupportSourceFiles, classesDir, launcherClasspath, annotationPatterns);
         timings.record("javac and annotation processing", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
         StartedServer startedServer = startServer(classesDir, options.port(), options.properties(), timings);
@@ -140,37 +127,6 @@ public final class MicronautSourceLauncher {
         if (envJavaHome != null && Files.isRegularFile(Path.of(envJavaHome, "lib", "modules"))) {
             System.setProperty("java.home", envJavaHome);
         }
-    }
-
-    private static LauncherClasspath launcherClasspath(Path workDir) throws IOException {
-        try {
-            return new LauncherClasspath(List.of(), false, InMemoryClassPath.fromLauncherResources());
-        } catch (IOException | RuntimeException e) {
-            return extractedLauncherClasspath(workDir);
-        }
-    }
-
-    private static LauncherClasspath extractedLauncherClasspath(Path workDir) throws IOException {
-        Path libsDir = Files.createDirectories(workDir.resolve("libs"));
-        return new LauncherClasspath(extractLauncherLibs(libsDir), true, null);
-    }
-
-    private static List<Path> extractLauncherLibs(Path libsDir) throws IOException {
-        ClassLoader classLoader = MicronautSourceLauncher.class.getClassLoader();
-        List<String> resources = readLibIndex(classLoader);
-        List<Path> libs = new ArrayList<>(resources.size());
-        for (String resource : resources) {
-            String fileName = Path.of(resource).getFileName().toString();
-            Path target = libsDir.resolve(fileName);
-            try (InputStream in = classLoader.getResourceAsStream(resource)) {
-                if (in == null) {
-                    throw new IOException("Missing launcher resource: " + resource);
-                }
-                Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-            }
-            libs.add(target);
-        }
-        return libs;
     }
 
     private static List<String> readLibIndex(ClassLoader classLoader) throws IOException {
@@ -359,7 +315,7 @@ public final class MicronautSourceLauncher {
             List<Path> testSourceFiles,
             List<Path> testSupportSourceFiles,
             Path classesDir,
-            LauncherClasspath launcherClasspath,
+            InMemoryClassPath launcherClasspath,
             List<String> annotationPatterns
     ) throws IOException {
         compile(sourceFiles, classesDir, launcherClasspath, annotationPatterns, true, List.of());
@@ -374,7 +330,7 @@ public final class MicronautSourceLauncher {
     private static void compile(
             List<Path> sourceFiles,
             Path classesDir,
-            LauncherClasspath launcherClasspath,
+            InMemoryClassPath launcherClasspath,
             List<String> annotationPatterns,
             boolean annotationProcessing,
             List<Path> additionalClassPath
@@ -401,14 +357,8 @@ public final class MicronautSourceLauncher {
         try (StandardJavaFileManager standardFileManager = compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
             standardFileManager.setLocationFromPaths(StandardLocation.ANNOTATION_PROCESSOR_PATH, List.of());
             JavaFileManager fileManager = standardFileManager;
-            List<Path> classPath = new ArrayList<>(additionalClassPath);
-            if (launcherClasspath.inMemoryClassPath() == null) {
-                classPath.addAll(launcherClasspath.paths());
-                standardFileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, classPath);
-            } else {
-                standardFileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, classPath);
-                fileManager = new InMemoryClassPathFileManager(standardFileManager, launcherClasspath.inMemoryClassPath());
-            }
+            standardFileManager.setLocationFromPaths(StandardLocation.CLASS_PATH, additionalClassPath);
+            fileManager = new InMemoryClassPathFileManager(standardFileManager, launcherClasspath);
 
             Iterable<? extends JavaFileObject> files = standardFileManager.getJavaFileObjectsFromPaths(sourceFiles);
             JavaCompiler.CompilationTask task = compiler.getTask(null, fileManager, diagnostics, compilerOptions, null, files);
@@ -590,9 +540,6 @@ public final class MicronautSourceLauncher {
                 System.out.println(line);
             }
         }
-    }
-
-    private record LauncherClasspath(List<Path> paths, boolean extracted, InMemoryClassPath inMemoryClassPath) {
     }
 
     private static final class InMemoryClassPath {
