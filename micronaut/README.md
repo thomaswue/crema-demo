@@ -111,6 +111,52 @@ are scanned recursively, so multi-file examples work without a local build
 tool. Runtime configuration can be supplied with `--property key=value` or
 `-Dkey=value`.
 
+## Maven Dependencies
+
+For source apps that need additional Maven dependencies, add a `deps.yml` file
+next to the source file or in the source directory passed to the launcher:
+
+```yaml
+dependencies:
+  - org.apache.commons:commons-text:1.12.0
+
+testDependencies:
+  - org.assertj:assertj-core:3.27.3
+
+repositories:
+  - central
+```
+
+The launcher resolves those dependencies with Maven Resolver baked into the
+launcher, adds the resolved jars to the `javac` classpath, and loads them into
+the source application classloader at runtime. `testDependencies` are only used
+with `--test`. Maven itself does not need to be installed to run the launcher.
+Dependencies are cached in the normal local Maven repository, defaulting to
+`~/.m2/repository` or `-Dmaven.repo.local=...`. HTTP proxy settings can be
+supplied through the usual `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`
+environment variables.
+
+By default, `deps.yml` is discovered in the common root of the application
+source paths. Use an explicit file or disable discovery if needed:
+
+```sh
+./micronaut --deps-file dependency-demo/deps.yml dependency-demo
+./micronaut --no-deps-file examples/hello
+```
+
+Run the checked-in dependency demo:
+
+```sh
+./micronaut dependency-demo
+curl http://localhost:8080/dependency/escape
+```
+
+Expected response:
+
+```text
+&lt;crema&gt;
+```
+
 ## Source Tests
 
 The launcher can also run a small Micronaut-style source test. Test mode
