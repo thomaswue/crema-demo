@@ -256,8 +256,8 @@ dependency injection across multiple source files, configuration properties,
 declarative HTTP clients, validation of JSON request bodies, and Micronaut Data
 JDBC with SQLite configured through `application.yml`.
 
-The `guides` directory contains guide-inspired examples with matching
-Micronaut Test sources:
+The `guides` directory contains guide-inspired examples. Each guide has its own
+`src` and `test` directories:
 
 ```sh
 ./guides/run-all.sh

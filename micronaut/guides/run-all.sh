@@ -13,5 +13,5 @@ for guide in \
   data-jdbc-sqlite
 do
   echo "== $guide =="
-  ./run-jvm.sh --test --port 0 "guides/$guide" -- "guides-tests/$guide"
+  ./run-jvm.sh --test --port 0 "guides/$guide/src" -- "guides/$guide/test"
 done

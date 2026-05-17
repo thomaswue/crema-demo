@@ -1,8 +1,8 @@
 # Micronaut guide examples
 
 This directory contains guide-inspired source applications that run directly
-through the `micronaut` source launcher. They are intentionally arranged as
-plain source/resource folders rather than Maven or Gradle projects.
+through the `micronaut` source launcher. Each guide is a plain directory with
+`src` and `test` subdirectories rather than a Maven or Gradle project.
 
 The Micronaut guides index was reviewed on 2026-05-17. The website feed
 currently lists 173 guide entries. The examples here start with guide areas that
@@ -21,13 +21,13 @@ curl -fsSL https://guides.micronaut.io/latest/feed.json \
 
 | Directory | Guide area | Run |
 | --- | --- | --- |
-| `creating-first-app` | Getting Started | `./micronaut --test --port 0 guides/creating-first-app -- guides-tests/creating-first-app` |
-| `dependency-injection` | Core Basics / DI | `./micronaut --test --port 0 guides/dependency-injection -- guides-tests/dependency-injection` |
-| `configuration-properties` | Core Basics / Configuration | `./micronaut --test --port 0 guides/configuration-properties -- guides-tests/configuration-properties` |
-| `validation` | Validation | `./micronaut --test --port 0 guides/validation -- guides-tests/validation` |
-| `http-client` | HTTP Client | `./micronaut --test --port 0 guides/http-client -- guides-tests/http-client` |
-| `static-resources` | Server-Side HTML / Static Resources | `./micronaut --test --port 0 guides/static-resources -- guides-tests/static-resources` |
-| `data-jdbc-sqlite` | Data JDBC | `./micronaut --test --port 0 guides/data-jdbc-sqlite -- guides-tests/data-jdbc-sqlite` |
+| `creating-first-app` | Getting Started | `./micronaut --test --port 0 guides/creating-first-app/src -- guides/creating-first-app/test` |
+| `dependency-injection` | Core Basics / DI | `./micronaut --test --port 0 guides/dependency-injection/src -- guides/dependency-injection/test` |
+| `configuration-properties` | Core Basics / Configuration | `./micronaut --test --port 0 guides/configuration-properties/src -- guides/configuration-properties/test` |
+| `validation` | Validation | `./micronaut --test --port 0 guides/validation/src -- guides/validation/test` |
+| `http-client` | HTTP Client | `./micronaut --test --port 0 guides/http-client/src -- guides/http-client/test` |
+| `static-resources` | Server-Side HTML / Static Resources | `./micronaut --test --port 0 guides/static-resources/src -- guides/static-resources/test` |
+| `data-jdbc-sqlite` | Data JDBC | `./micronaut --test --port 0 guides/data-jdbc-sqlite/src -- guides/data-jdbc-sqlite/test` |
 
 ## Website guide IDs covered or partially covered
 
