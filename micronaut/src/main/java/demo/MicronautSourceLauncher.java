@@ -80,6 +80,7 @@ import java.util.Collections;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -87,6 +88,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Pattern;
+import java.util.jar.JarFile;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.Inflater;
@@ -96,7 +98,7 @@ import org.w3c.dom.Node;
 
 public final class MicronautSourceLauncher {
     private static final String LIB_INDEX = "launcher-libs.index";
-    private static final String DEFAULT_DEPS_FILE = "deps.yml";
+    private static final List<String> APPLICATION_CONFIG_FILES = List.of("application.yml", "application.yaml");
     private static final String SOURCE_LAUNCHER_CONTEXT_BUILDER = "io.crema.micronaut.test.SourceLauncherContextBuilder";
     private static final String MICRONAUT_TEST_DESCRIPTOR = "Lio/micronaut/test/extensions/junit5/annotation/MicronautTest;";
     private static final Pattern PACKAGE_DECLARATION = Pattern.compile(
@@ -116,6 +118,7 @@ public final class MicronautSourceLauncher {
         LaunchOptions options = LaunchOptions.parse(args);
         List<Path> sourceFiles = collectSourceFiles(options.sourcePaths());
         List<Path> testSourceFiles = options.test() ? collectSourceFiles(options.testSourcePaths()) : List.of();
+        List<ResourceFile> resourceFiles = collectResourceFiles(options.sourcePaths());
         List<String> annotationPatterns = annotationPatterns(sourceFiles, options.annotationPatterns());
         List<String> testAnnotationPatterns = options.test()
                 ? annotationPatterns(concat(sourceFiles, testSourceFiles), options.annotationPatterns())
@@ -128,7 +131,7 @@ public final class MicronautSourceLauncher {
         long startNanos = System.nanoTime();
         long phaseStartNanos = System.nanoTime();
         List<Path> dependencyClasspath = dependencyClasspath(options);
-        timings.record("resolve deps.yml", phaseStartNanos);
+        timings.record("resolve dependencies", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
         InMemoryClassPath launcherClasspath = InMemoryClassPath.fromLauncherResources(options.test());
         timings.record("index launcher libs", phaseStartNanos);
@@ -140,9 +143,11 @@ public final class MicronautSourceLauncher {
                 launcherClasspath,
                 dependencyClasspath,
                 annotationPatterns,
-                testAnnotationPatterns
+                testAnnotationPatterns,
+                resourceFiles
         );
         timings.record("javac and annotation processing", phaseStartNanos);
+        loadBuiltInJdbcDrivers(resourceFiles, options.properties());
         if (options.test()) {
             int failures = runTests(testSourceFiles, compiledOutput, dependencyClasspath, options.port(), options.properties(), timings);
             timings.print();
@@ -222,13 +227,64 @@ public final class MicronautSourceLauncher {
         return List.copyOf(sourceFiles);
     }
 
+    private static List<ResourceFile> collectResourceFiles(List<Path> sourcePaths) throws IOException {
+        Map<String, ResourceFile> resources = new LinkedHashMap<>();
+        for (Path sourcePath : sourcePaths) {
+            Path path = sourcePath.toAbsolutePath().normalize();
+            if (Files.isRegularFile(path)) {
+                collectSiblingApplicationResource(path, resources);
+            } else if (Files.isDirectory(path)) {
+                try (Stream<Path> files = Files.walk(path)) {
+                    for (Path file : files.filter(Files::isRegularFile).sorted().toList()) {
+                        if (isSourceResource(file)) {
+                            putResource(resources, resourceName(path, file), file);
+                        }
+                    }
+                }
+            } else {
+                throw new IllegalArgumentException("Source path does not exist: " + path);
+            }
+        }
+        return List.copyOf(resources.values());
+    }
+
+    private static void collectSiblingApplicationResource(Path sourceFile, Map<String, ResourceFile> resources) {
+        Path parent = sourceFile.getParent();
+        if (parent == null) {
+            return;
+        }
+        for (String fileName : List.of("application.yml", "application.yaml", "application.properties", "application.json")) {
+            Path resource = parent.resolve(fileName);
+            if (Files.isRegularFile(resource)) {
+                putResource(resources, fileName, resource);
+            }
+        }
+    }
+
+    private static boolean isSourceResource(Path file) {
+        String fileName = file.getFileName().toString();
+        return !fileName.endsWith(".java");
+    }
+
+    private static String resourceName(Path root, Path file) {
+        return root.relativize(file).toString().replace(file.getFileSystem().getSeparator(), "/");
+    }
+
+    private static void putResource(Map<String, ResourceFile> resources, String resourceName, Path file) {
+        ResourceFile previous = resources.putIfAbsent(resourceName, new ResourceFile(resourceName, file));
+        if (previous != null && !previous.path().equals(file)) {
+            throw new IllegalArgumentException("Duplicate application resource '" + resourceName + "': "
+                    + previous.path() + " and " + file);
+        }
+    }
+
     private static List<Path> dependencyClasspath(LaunchOptions options) throws IOException {
-        Optional<Path> depsFile = depsFile(options);
-        if (depsFile.isEmpty()) {
+        List<DependencyManifest> manifests = dependencyManifests(options);
+        if (manifests.isEmpty()) {
             return List.of();
         }
 
-        DependencyManifest manifest = DependencyManifest.read(depsFile.get());
+        DependencyManifest manifest = DependencyManifest.merge(manifests);
         List<DependencyCoordinate> dependencies = manifest.dependencies(options.test());
         if (dependencies.isEmpty()) {
             return List.of();
@@ -237,21 +293,34 @@ public final class MicronautSourceLauncher {
         return resolveDependencies(manifest, dependencies);
     }
 
-    private static Optional<Path> depsFile(LaunchOptions options) throws IOException {
-        if (options.disableDepsFile()) {
-            return Optional.empty();
+    private static List<DependencyManifest> dependencyManifests(LaunchOptions options) throws IOException {
+        if (options.disableDependencies()) {
+            return List.of();
+        }
+        List<DependencyManifest> manifests = new ArrayList<>();
+        Optional<Path> applicationConfig = defaultApplicationConfig(options);
+        if (applicationConfig.isPresent()) {
+            manifests.add(DependencyManifest.read(applicationConfig.get()));
         }
         if (options.depsFile().isPresent()) {
             Path configured = options.depsFile().get().toAbsolutePath().normalize();
             if (!Files.isRegularFile(configured)) {
                 throw new IllegalArgumentException("Dependency file does not exist: " + configured);
             }
-            return Optional.of(configured);
+            manifests.add(DependencyManifest.read(configured));
         }
+        return List.copyOf(manifests);
+    }
 
+    private static Optional<Path> defaultApplicationConfig(LaunchOptions options) throws IOException {
         Path root = commonSourceRoot(options.sourcePaths());
-        Path candidate = root.resolve(DEFAULT_DEPS_FILE);
-        return Files.isRegularFile(candidate) ? Optional.of(candidate) : Optional.empty();
+        for (String fileName : APPLICATION_CONFIG_FILES) {
+            Path candidate = root.resolve(fileName);
+            if (Files.isRegularFile(candidate)) {
+                return Optional.of(candidate);
+            }
+        }
+        return Optional.empty();
     }
 
     private static Path commonSourceRoot(List<Path> sourcePaths) throws IOException {
@@ -294,7 +363,7 @@ public final class MicronautSourceLauncher {
             DependencyManifest manifest,
             List<DependencyCoordinate> dependencies
     ) {
-        failOnDirectVersionConflicts(manifest.file(), dependencies);
+        failOnDirectVersionConflicts(manifest.source(), dependencies);
 
         RepositorySystem repositorySystem = newRepositorySystem();
         DefaultRepositorySystemSession session = newRepositorySystemSession(repositorySystem);
@@ -461,13 +530,13 @@ public final class MicronautSourceLauncher {
                 .filter(value -> !value.isEmpty());
     }
 
-    private static void failOnDirectVersionConflicts(Path file, List<DependencyCoordinate> dependencies) {
+    private static void failOnDirectVersionConflicts(String source, List<DependencyCoordinate> dependencies) {
         Map<String, String> versions = new HashMap<>();
         for (DependencyCoordinate dependency : dependencies) {
             String key = dependency.groupId() + ":" + dependency.artifactId();
             String previous = versions.putIfAbsent(key, dependency.version());
             if (previous != null && !previous.equals(dependency.version())) {
-                throw new IllegalArgumentException(file + ": Conflicting direct dependency versions for "
+                throw new IllegalArgumentException(source + ": Conflicting direct dependency versions for "
                         + key + ": " + previous + " and " + dependency.version());
             }
         }
@@ -713,15 +782,52 @@ public final class MicronautSourceLauncher {
             InMemoryClassPath launcherClasspath,
             List<Path> dependencyClasspath,
             List<String> annotationPatterns,
-            List<String> testAnnotationPatterns
+            List<String> testAnnotationPatterns,
+            List<ResourceFile> resourceFiles
     ) throws IOException {
         InMemoryCompilationOutput output = new InMemoryCompilationOutput();
+        for (ResourceFile resourceFile : resourceFiles) {
+            output.putResource(resourceFile.name(), Files.readAllBytes(resourceFile.path()));
+        }
         compile(sourceFiles, List.of(), output, launcherClasspath, annotationPatterns, true, dependencyClasspath);
         if (!testSourceFiles.isEmpty()) {
             compile(testSourceFiles, testSupportSourceFiles, output, launcherClasspath, testAnnotationPatterns, true, dependencyClasspath);
             addSourceLauncherContextBuilderToMicronautTests(output);
         }
         return output.snapshot();
+    }
+
+    private record ResourceFile(String name, Path path) {
+    }
+
+    private static void loadBuiltInJdbcDrivers(List<ResourceFile> resourceFiles, Map<String, Object> properties) throws IOException {
+        if (usesBuiltInSqliteDriver(resourceFiles, properties)) {
+            try {
+                Class.forName(org.sqlite.JDBC.class.getName(), true, MicronautSourceLauncher.class.getClassLoader());
+            } catch (ClassNotFoundException e) {
+                throw new IllegalStateException("Built-in SQLite JDBC driver is not available.", e);
+            }
+        }
+    }
+
+    private static boolean usesBuiltInSqliteDriver(List<ResourceFile> resourceFiles, Map<String, Object> properties) throws IOException {
+        for (ResourceFile resourceFile : resourceFiles) {
+            String content = new String(Files.readAllBytes(resourceFile.path()), StandardCharsets.ISO_8859_1);
+            if (mentionsBuiltInSqliteDriver(content)) {
+                return true;
+            }
+        }
+        for (Map.Entry<String, Object> entry : properties.entrySet()) {
+            if (mentionsBuiltInSqliteDriver(entry.getKey()) ||
+                    mentionsBuiltInSqliteDriver(String.valueOf(entry.getValue()))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean mentionsBuiltInSqliteDriver(String value) {
+        return value.contains("org.sqlite.JDBC") || value.contains("jdbc:sqlite:");
     }
 
     private static void addSourceLauncherContextBuilderToMicronautTests(InMemoryCompilationOutput output) {
@@ -882,7 +988,12 @@ public final class MicronautSourceLauncher {
         for (Path dependency : dependencyClasspath) {
             urls.add(dependency.toUri().toURL());
         }
-        return new MemoryApplicationClassLoader(urls.toArray(URL[]::new), MicronautSourceLauncher.class.getClassLoader(), compiledOutput);
+        return new MemoryApplicationClassLoader(
+                urls.toArray(URL[]::new),
+                MicronautSourceLauncher.class.getClassLoader(),
+                compiledOutput,
+                dependencyClasspath
+        );
     }
 
     private static Map<String, Object> launchProperties(int port, Map<String, Object> launchProperties) {
@@ -1020,10 +1131,18 @@ public final class MicronautSourceLauncher {
     private static final class MemoryApplicationClassLoader extends URLClassLoader
             implements DynamicServiceLoaderBridge.GeneratedServiceProvider {
         private final InMemoryCompilationOutput output;
+        private final List<Path> dependencyClasspath;
+        private final Map<String, List<String>> dependencyServices = new HashMap<>();
 
-        private MemoryApplicationClassLoader(URL[] urls, ClassLoader parent, InMemoryCompilationOutput output) {
+        private MemoryApplicationClassLoader(
+                URL[] urls,
+                ClassLoader parent,
+                InMemoryCompilationOutput output,
+                List<Path> dependencyClasspath
+        ) {
             super(urls, parent);
             this.output = output;
+            this.dependencyClasspath = List.copyOf(dependencyClasspath);
         }
 
         @Override
@@ -1054,7 +1173,42 @@ public final class MicronautSourceLauncher {
 
         @Override
         public List<String> generatedMicronautServiceClassNames(String serviceName) {
-            return output.generatedMicronautServiceClassNames(serviceName);
+            LinkedHashSet<String> classNames = new LinkedHashSet<>(output.generatedMicronautServiceClassNames(serviceName));
+            classNames.addAll(dependencyMicronautServiceClassNames(serviceName));
+            return List.copyOf(classNames);
+        }
+
+        private synchronized List<String> dependencyMicronautServiceClassNames(String serviceName) {
+            return dependencyServices.computeIfAbsent(serviceName, this::readDependencyMicronautServiceClassNames);
+        }
+
+        private List<String> readDependencyMicronautServiceClassNames(String serviceName) {
+            String prefix = "META-INF/micronaut/" + serviceName + "/";
+            LinkedHashSet<String> classNames = new LinkedHashSet<>();
+            for (Path dependency : dependencyClasspath) {
+                try (JarFile jarFile = new JarFile(dependency.toFile())) {
+                    jarFile.stream()
+                            .map(entry -> entry.getName())
+                            .filter(name -> name.startsWith(prefix))
+                            .map(name -> name.substring(prefix.length()))
+                            .filter(name -> !name.isEmpty() && !name.contains("/"))
+                            .filter(this::canLoadClass)
+                            .sorted()
+                            .forEach(classNames::add);
+                } catch (IOException e) {
+                    throw new IllegalStateException("Cannot read Micronaut service entries from " + dependency, e);
+                }
+            }
+            return List.copyOf(classNames);
+        }
+
+        private boolean canLoadClass(String className) {
+            try {
+                Class.forName(className, false, this).getDeclaredConstructor().newInstance();
+                return true;
+            } catch (ReflectiveOperationException | LinkageError e) {
+                return false;
+            }
         }
     }
 
@@ -1704,7 +1858,7 @@ public final class MicronautSourceLauncher {
             boolean timings,
             boolean test,
             Optional<Path> depsFile,
-            boolean disableDepsFile
+            boolean disableDependencies
     ) {
         static LaunchOptions parse(String[] args) {
             List<Path> sourcePaths = new ArrayList<>();
@@ -1716,7 +1870,7 @@ public final class MicronautSourceLauncher {
             boolean test = false;
             boolean parsingTestSources = false;
             Optional<Path> depsFile = Optional.empty();
-            boolean disableDepsFile = false;
+            boolean disableDependencies = false;
 
             for (int i = 0; i < args.length; i++) {
                 String arg = args[i];
@@ -1726,7 +1880,7 @@ public final class MicronautSourceLauncher {
                     case "--port" -> port = Integer.parseInt(requireValue(args, ++i, arg));
                     case "--timings" -> timings = true;
                     case "--deps-file" -> depsFile = Optional.of(Path.of(requireValue(args, ++i, arg)));
-                    case "--no-deps-file" -> disableDepsFile = true;
+                    case "--no-dependencies", "--no-deps-file" -> disableDependencies = true;
                     case "--package" -> annotationPatterns.addAll(annotationPatterns(requireValue(args, ++i, arg)));
                     case "--property" -> addProperty(properties, requireValue(args, ++i, arg));
                     case "--help", "-h" -> usageAndExit();
@@ -1759,7 +1913,7 @@ public final class MicronautSourceLauncher {
                     timings,
                     test,
                     depsFile,
-                    disableDepsFile
+                    disableDependencies
             );
         }
 
@@ -1771,8 +1925,8 @@ public final class MicronautSourceLauncher {
         }
 
         private static void usageAndExit() {
-            System.err.println("Usage: ./micronaut [--port 8080] [--timings] [--deps-file deps.yml] [--no-deps-file] [--package demo] [--property key=value] <source.java|source-directory>...");
-            System.err.println("       ./micronaut --test [--port 8080] [--deps-file deps.yml] <app-source.java|app-source-directory>... -- <test-source.java|test-source-directory>...");
+            System.err.println("Usage: ./micronaut [--port 8080] [--timings] [--deps-file dependencies.yml] [--no-dependencies] [--package demo] [--property key=value] <source.java|source-directory>...");
+            System.err.println("       ./micronaut --test [--port 8080] [--deps-file dependencies.yml] <app-source.java|app-source-directory>... -- <test-source.java|test-source-directory>...");
             System.exit(2);
         }
 
@@ -1794,7 +1948,7 @@ public final class MicronautSourceLauncher {
     }
 
     private record DependencyManifest(
-            Path file,
+            String source,
             List<String> dependencies,
             List<String> testDependencies,
             List<String> repositories
@@ -1803,7 +1957,8 @@ public final class MicronautSourceLauncher {
             List<String> dependencies = new ArrayList<>();
             List<String> testDependencies = new ArrayList<>();
             List<String> repositories = new ArrayList<>();
-            String section = null;
+            String topLevelSection = null;
+            String dependencySection = null;
             int lineNumber = 0;
             for (String rawLine : Files.readAllLines(file, StandardCharsets.UTF_8)) {
                 lineNumber++;
@@ -1811,34 +1966,68 @@ public final class MicronautSourceLauncher {
                 if (line.isEmpty()) {
                     continue;
                 }
-                if (!rawLine.startsWith(" ") && line.endsWith(":")) {
-                    section = line.substring(0, line.length() - 1).trim();
-                    switch (section) {
-                        case "dependencies", "testDependencies", "repositories" -> {
-                        }
-                        default -> throw new IllegalArgumentException(file + ":" + lineNumber
-                                + ": Unsupported dependency manifest section: " + section);
-                    }
+                int indent = leadingSpaces(rawLine);
+                if (indent == 0 && line.endsWith(":")) {
+                    topLevelSection = line.substring(0, line.length() - 1).trim();
+                    dependencySection = "dependencies".equals(topLevelSection) ? "main" : null;
                     continue;
                 }
-                if (section == null || !line.startsWith("- ")) {
+
+                if ("dependencies".equals(topLevelSection)) {
+                    if (indent == 2 && line.endsWith(":")) {
+                        dependencySection = line.substring(0, line.length() - 1).trim();
+                        switch (dependencySection) {
+                            case "main", "test", "repositories" -> {
+                            }
+                            default -> throw new IllegalArgumentException(file + ":" + lineNumber
+                                    + ": Unsupported dependencies section: " + dependencySection);
+                        }
+                        continue;
+                    }
+                    if ((indent == 2 || indent == 4) && line.startsWith("- ")) {
+                        String value = dependencyManifestValue(file, lineNumber, line);
+                        switch (dependencySection) {
+                            case "main" -> dependencies.add(value);
+                            case "test" -> testDependencies.add(value);
+                            case "repositories" -> repositories.add(value);
+                            default -> throw new IllegalStateException("Unexpected dependencies section: " + dependencySection);
+                        }
+                        continue;
+                    }
                     throw new IllegalArgumentException(file + ":" + lineNumber
-                            + ": Expected a top-level section or list item.");
+                            + ": Expected dependencies.main, dependencies.test, dependencies.repositories, or a dependency list item.");
                 }
 
-                String value = unquote(line.substring(2).trim());
-                if (value.isEmpty()) {
-                    throw new IllegalArgumentException(file + ":" + lineNumber + ": Empty dependency manifest value.");
-                }
-                switch (section) {
-                    case "dependencies" -> dependencies.add(value);
-                    case "testDependencies" -> testDependencies.add(value);
-                    case "repositories" -> repositories.add(value);
-                    default -> throw new IllegalStateException("Unexpected section: " + section);
+                if (("testDependencies".equals(topLevelSection) || "repositories".equals(topLevelSection)) && line.startsWith("- ")) {
+                    String value = dependencyManifestValue(file, lineNumber, line);
+                    if ("testDependencies".equals(topLevelSection)) {
+                        testDependencies.add(value);
+                    } else {
+                        repositories.add(value);
+                    }
                 }
             }
             return new DependencyManifest(
-                    file,
+                    file.toString(),
+                    List.copyOf(dependencies),
+                    List.copyOf(testDependencies),
+                    List.copyOf(repositories)
+            );
+        }
+
+        private static DependencyManifest merge(List<DependencyManifest> manifests) {
+            List<String> dependencies = new ArrayList<>();
+            List<String> testDependencies = new ArrayList<>();
+            List<String> repositories = new ArrayList<>();
+            List<String> sources = new ArrayList<>();
+            for (DependencyManifest manifest : manifests) {
+                dependencies.addAll(manifest.dependencies());
+                testDependencies.addAll(manifest.testDependencies());
+                repositories.addAll(manifest.repositories());
+                sources.add(manifest.source());
+            }
+            return new DependencyManifest(
+                    String.join(", ", sources),
                     List.copyOf(dependencies),
                     List.copyOf(testDependencies),
                     List.copyOf(repositories)
@@ -1851,8 +2040,24 @@ public final class MicronautSourceLauncher {
                 selected.addAll(testDependencies);
             }
             return selected.stream()
-                    .map(value -> DependencyCoordinate.parse(file, value))
+                    .map(value -> DependencyCoordinate.parse(source, value))
                     .toList();
+        }
+
+        private static String dependencyManifestValue(Path file, int lineNumber, String line) {
+            String value = unquote(line.substring(2).trim());
+            if (value.isEmpty()) {
+                throw new IllegalArgumentException(file + ":" + lineNumber + ": Empty dependency manifest value.");
+            }
+            return value;
+        }
+
+        private static int leadingSpaces(String line) {
+            int spaces = 0;
+            while (spaces < line.length() && line.charAt(spaces) == ' ') {
+                spaces++;
+            }
+            return spaces;
         }
 
         private static String stripComment(String line) {
@@ -1883,10 +2088,10 @@ public final class MicronautSourceLauncher {
             return groupId + ":" + artifactId;
         }
 
-        private static DependencyCoordinate parse(Path file, String value) {
+        private static DependencyCoordinate parse(String source, String value) {
             String[] parts = value.split(":");
             if (parts.length != 3 || parts[0].isBlank() || parts[1].isBlank() || parts[2].isBlank()) {
-                throw new IllegalArgumentException(file + ": Dependency coordinates must use groupId:artifactId:version syntax: " + value);
+                throw new IllegalArgumentException(source + ": Dependency coordinates must use groupId:artifactId:version syntax: " + value);
             }
             return new DependencyCoordinate(parts[0], parts[1], parts[2]);
         }

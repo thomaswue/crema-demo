@@ -111,40 +111,42 @@ Use another port if needed:
 
 The launcher accepts one or more Java source files or directories. Directories
 are scanned recursively, so multi-file examples work without a local build
-tool. Runtime configuration can be supplied with `--property key=value` or
-`-Dkey=value`.
+tool. Non-Java files in source directories are added to the in-memory
+application classpath, so examples can include Micronaut resources such as
+`application.yml`. Runtime configuration can also be supplied with
+`--property key=value` or `-Dkey=value`.
 
 ## Maven Dependencies
 
-For source apps that need additional Maven dependencies, add a `deps.yml` file
-next to the source file or in the source directory passed to the launcher:
+For source apps that need additional Maven dependencies, add them to
+`application.yml` in the source directory passed to the launcher:
 
 ```yaml
 dependencies:
-  - org.apache.commons:commons-text:1.12.0
-
-testDependencies:
-  - org.assertj:assertj-core:3.27.3
-
-repositories:
-  - central
+  main:
+    - org.apache.commons:commons-text:1.12.0
+  test:
+    - org.assertj:assertj-core:3.27.3
+  repositories:
+    - central
 ```
 
 The launcher resolves those dependencies with Maven Resolver baked into the
 launcher, adds the resolved jars to the `javac` classpath, and loads them into
-the source application classloader at runtime. `testDependencies` are only used
+the source application classloader at runtime. `dependencies.test` is only used
 with `--test`. Maven itself does not need to be installed to run the launcher.
 Dependencies are cached in the normal local Maven repository, defaulting to
 `~/.m2/repository` or `-Dmaven.repo.local=...`. HTTP proxy settings can be
 supplied through the usual `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`
 environment variables.
 
-By default, `deps.yml` is discovered in the common root of the application
-source paths. Use an explicit file or disable discovery if needed:
+By default, dependencies are read from `application.yml` or `application.yaml`
+in the common root of the application source paths. Use an explicit additional
+dependency file or disable dependency discovery if needed:
 
 ```sh
-./micronaut --deps-file dependency-demo/deps.yml dependency-demo
-./micronaut --no-deps-file examples/hello
+./micronaut --deps-file extra-dependencies.yml dependency-demo
+./micronaut --no-dependencies examples/hello
 ```
 
 Run the checked-in dependency demo:
@@ -238,11 +240,21 @@ curl http://localhost:8085/client/greet/Turing
 curl -H 'Content-Type: application/json' \
   -d '{"title":"Native Micronaut","pages":123}' \
   http://localhost:8086/books
+
+./micronaut --port 8087 examples/data-sqlite
+curl http://localhost:8087/books
+
+./micronaut --test --port 0 examples/data-sqlite -- tests/data-sqlite
 ```
 
 The examples cover a plain text controller, path variables, JSON serialization,
 dependency injection across multiple source files, configuration properties,
-declarative HTTP clients, and validation of JSON request bodies.
+declarative HTTP clients, validation of JSON request bodies, and Micronaut Data
+JDBC with SQLite configured through `application.yml`.
+
+The SQLite JDBC driver is built into the launcher because Xerial SQLite uses a
+native library and Native Image JNI metadata. The Data/SQLite example still uses
+`application.yml` for the Micronaut Data JDBC and Hikari modules.
 
 All examples can also be launched together:
 
