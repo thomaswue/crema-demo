@@ -1,0 +1,5 @@
+warehouse:
+  name: guide-test-warehouse
+  limits:
+    max-items: 42
+    refrigerated: true

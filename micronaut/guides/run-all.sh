@@ -1,0 +1,17 @@
+#!/usr/bin/env sh
+set -eu
+
+cd "$(dirname "$0")/.."
+
+for guide in \
+  creating-first-app \
+  dependency-injection \
+  configuration-properties \
+  validation \
+  http-client \
+  static-resources \
+  data-jdbc-sqlite
+do
+  echo "== $guide =="
+  ./run-jvm.sh --test --port 0 "guides/$guide" -- "guides-tests/$guide"
+done

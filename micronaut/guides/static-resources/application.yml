@@ -1,0 +1,7 @@
+micronaut:
+  router:
+    static-resources:
+      guide:
+        enabled: true
+        paths: classpath:public
+        mapping: /guide/assets/**

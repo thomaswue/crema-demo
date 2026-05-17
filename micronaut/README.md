@@ -112,9 +112,13 @@ Use another port if needed:
 The launcher accepts one or more Java source files or directories. Directories
 are scanned recursively, so multi-file examples work without a local build
 tool. Non-Java files in source directories are added to the in-memory
-application classpath, so examples can include Micronaut resources such as
-`application.yml`. Runtime configuration can also be supplied with
-`--property key=value` or `-Dkey=value`.
+application classpath, so examples can include Micronaut resources. Root
+`application.yml`, `application.yaml`, `application.properties`, and
+`application.json` files are loaded with Micronaut property source loaders and
+passed into the source application context without being parsed again by
+Micronaut. Active environment variants such as `application-test.yml` are also
+loaded; test mode enables the `test` environment. Runtime configuration can also
+be supplied with `--property key=value` or `-Dkey=value`.
 
 ## Maven Dependencies
 
@@ -251,6 +255,17 @@ The examples cover a plain text controller, path variables, JSON serialization,
 dependency injection across multiple source files, configuration properties,
 declarative HTTP clients, validation of JSON request bodies, and Micronaut Data
 JDBC with SQLite configured through `application.yml`.
+
+The `guides` directory contains guide-inspired examples with matching
+Micronaut Test sources:
+
+```sh
+./guides/run-all.sh
+```
+
+Those examples currently cover creating a first app, dependency injection,
+configuration properties with `application-test.yml`, validation, declarative
+HTTP clients, static resources, and Micronaut Data JDBC with SQLite.
 
 The SQLite JDBC driver is built into the launcher because Xerial SQLite uses a
 native library and Native Image JNI metadata. The Data/SQLite example still uses

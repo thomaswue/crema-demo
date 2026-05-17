@@ -8,7 +8,10 @@ import io.micronaut.annotation.processing.TypeElementVisitorProcessor;
 import io.micronaut.context.ApplicationContext;
 import io.micronaut.context.ApplicationContextBuilder;
 import io.micronaut.context.env.PropertySource;
+import io.micronaut.context.env.PropertySourceLoader;
+import io.micronaut.context.env.PropertiesPropertySourceLoader;
 import io.micronaut.context.env.yaml.YamlPropertySourceLoader;
+import io.micronaut.core.order.Ordered;
 import io.micronaut.core.io.service.DynamicServiceLoaderBridge;
 import io.micronaut.runtime.server.EmbeddedServer;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
@@ -102,7 +105,8 @@ import java.util.zip.InflaterInputStream;
 
 public final class MicronautSourceLauncher {
     private static final String LIB_INDEX = "launcher-libs.index";
-    private static final List<String> APPLICATION_CONFIG_FILES = List.of("application.yml", "application.yaml");
+    private static final String APPLICATION_CONFIG_ROOT = "application";
+    private static final List<String> APPLICATION_CONFIG_EXTENSIONS = List.of("yml", "yaml", "properties", "json");
     private static final String SOURCE_LAUNCHER_CONTEXT_BUILDER = "io.crema.micronaut.test.SourceLauncherContextBuilder";
     private static final String MICRONAUT_TEST_DESCRIPTOR = "Lio/micronaut/test/extensions/junit5/annotation/MicronautTest;";
     private static final Pattern PACKAGE_DECLARATION = Pattern.compile(
@@ -123,7 +127,7 @@ public final class MicronautSourceLauncher {
         List<Path> sourceFiles = collectSourceFiles(options.sourcePaths());
         List<Path> testSourceFiles = options.test() ? collectSourceFiles(options.testSourcePaths()) : List.of();
         List<ResourceFile> resourceFiles = collectResourceFiles(options.sourcePaths());
-        List<ApplicationConfig> applicationConfigs = applicationConfigs(resourceFiles);
+        List<ApplicationConfig> applicationConfigs = applicationConfigs(resourceFiles, options);
         List<ResourceFile> classpathResourceFiles = classpathResourceFiles(resourceFiles);
         List<String> annotationPatterns = annotationPatterns(sourceFiles, options.annotationPatterns());
         List<String> testAnnotationPatterns = options.test()
@@ -254,15 +258,17 @@ public final class MicronautSourceLauncher {
         return List.copyOf(resources.values());
     }
 
-    private static void collectSiblingApplicationResource(Path sourceFile, Map<String, ResourceFile> resources) {
+    private static void collectSiblingApplicationResource(Path sourceFile, Map<String, ResourceFile> resources) throws IOException {
         Path parent = sourceFile.getParent();
         if (parent == null) {
             return;
         }
-        for (String fileName : List.of("application.yml", "application.yaml", "application.properties", "application.json")) {
-            Path resource = parent.resolve(fileName);
-            if (Files.isRegularFile(resource)) {
-                putResource(resources, fileName, resource);
+        try (Stream<Path> files = Files.list(parent)) {
+            for (Path resource : files.filter(Files::isRegularFile).sorted().toList()) {
+                String fileName = resource.getFileName().toString();
+                if (isApplicationConfigFileName(fileName)) {
+                    putResource(resources, fileName, resource);
+                }
             }
         }
     }
@@ -284,11 +290,15 @@ public final class MicronautSourceLauncher {
         }
     }
 
-    private static List<ApplicationConfig> applicationConfigs(List<ResourceFile> resourceFiles) throws IOException {
+    private static List<ApplicationConfig> applicationConfigs(List<ResourceFile> resourceFiles, LaunchOptions options) throws IOException {
+        Map<String, PropertySourceLoader> loaders = applicationConfigLoaders();
+        List<String> activeEnvironmentNames = activeEnvironmentNames(options);
         List<ApplicationConfig> configs = new ArrayList<>();
         for (ResourceFile resourceFile : resourceFiles) {
-            if (isRootApplicationYaml(resourceFile.name())) {
-                configs.add(ApplicationConfig.read(resourceFile.path(), resourceFile.name()));
+            Optional<ApplicationConfigResource> applicationConfig =
+                    applicationConfig(resourceFile.name(), activeEnvironmentNames, loaders);
+            if (applicationConfig.isPresent()) {
+                configs.add(applicationConfig.get().read(resourceFile.path()));
             }
         }
         return List.copyOf(configs);
@@ -296,12 +306,106 @@ public final class MicronautSourceLauncher {
 
     private static List<ResourceFile> classpathResourceFiles(List<ResourceFile> resourceFiles) {
         return resourceFiles.stream()
-                .filter(resourceFile -> !isRootApplicationYaml(resourceFile.name()))
+                .filter(resourceFile -> !isApplicationConfigResource(resourceFile.name()))
                 .toList();
     }
 
-    private static boolean isRootApplicationYaml(String resourceName) {
-        return APPLICATION_CONFIG_FILES.contains(resourceName);
+    private static Optional<ApplicationConfigResource> applicationConfig(
+            String resourceName,
+            List<String> activeEnvironmentNames,
+            Map<String, PropertySourceLoader> loaders
+    ) {
+        if (!isRootResource(resourceName)) {
+            return Optional.empty();
+        }
+        for (Map.Entry<String, PropertySourceLoader> entry : loaders.entrySet()) {
+            String extension = entry.getKey();
+            PropertySourceLoader loader = entry.getValue();
+            if (resourceName.equals(APPLICATION_CONFIG_ROOT + "." + extension)) {
+                return Optional.of(new ApplicationConfigResource(resourceName, APPLICATION_CONFIG_ROOT, loader, loaderOrder(loader)));
+            }
+            for (int i = 0; i < activeEnvironmentNames.size(); i++) {
+                String environmentName = activeEnvironmentNames.get(i);
+                String configName = APPLICATION_CONFIG_ROOT + "-" + environmentName;
+                if (resourceName.equals(configName + "." + extension)) {
+                    return Optional.of(new ApplicationConfigResource(resourceName, configName, loader, loaderOrder(loader) + 1 + i));
+                }
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean isApplicationConfigResource(String resourceName) {
+        return isRootResource(resourceName) && isApplicationConfigFileName(resourceName);
+    }
+
+    private static boolean isApplicationConfigFileName(String fileName) {
+        if (!fileName.startsWith(APPLICATION_CONFIG_ROOT + ".") && !fileName.startsWith(APPLICATION_CONFIG_ROOT + "-")) {
+            return false;
+        }
+        int extensionSeparator = fileName.lastIndexOf('.');
+        if (extensionSeparator < 0) {
+            return false;
+        }
+        return APPLICATION_CONFIG_EXTENSIONS.contains(fileName.substring(extensionSeparator + 1));
+    }
+
+    private static boolean isRootResource(String resourceName) {
+        return !resourceName.contains("/");
+    }
+
+    private static Map<String, PropertySourceLoader> applicationConfigLoaders() {
+        Map<String, PropertySourceLoader> loaders = new LinkedHashMap<>();
+        addApplicationConfigLoader(loaders, new YamlPropertySourceLoader(false));
+        addApplicationConfigLoader(loaders, new PropertiesPropertySourceLoader(false));
+        instantiatePropertySourceLoader("io.micronaut.jackson.env.JsonPropertySourceLoader")
+                .or(() -> instantiatePropertySourceLoader("io.micronaut.jackson.core.env.JsonPropertySourceLoader"))
+                .ifPresent(loader -> addApplicationConfigLoader(loaders, loader));
+        return Collections.unmodifiableMap(new LinkedHashMap<>(loaders));
+    }
+
+    private static Optional<PropertySourceLoader> instantiatePropertySourceLoader(String className) {
+        try {
+            Class<?> type = Class.forName(className);
+            try {
+                return Optional.of((PropertySourceLoader) type.getConstructor(boolean.class).newInstance(false));
+            } catch (NoSuchMethodException ignored) {
+                return Optional.of((PropertySourceLoader) type.getConstructor().newInstance());
+            }
+        } catch (ReflectiveOperationException | LinkageError e) {
+            return Optional.empty();
+        }
+    }
+
+    private static void addApplicationConfigLoader(Map<String, PropertySourceLoader> loaders, PropertySourceLoader loader) {
+        for (String extension : loader.getExtensions()) {
+            loaders.putIfAbsent(extension, loader);
+        }
+    }
+
+    private static int loaderOrder(PropertySourceLoader loader) {
+        return loader instanceof Ordered ordered ? ordered.getOrder() : Ordered.LOWEST_PRECEDENCE;
+    }
+
+    private static List<String> activeEnvironmentNames(LaunchOptions options) {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        addEnvironmentNames(names, System.getProperty("micronaut.environments"));
+        addEnvironmentNames(names, System.getenv("MICRONAUT_ENVIRONMENTS"));
+        addEnvironmentNames(names, options.properties().get("micronaut.environments"));
+        if (options.test()) {
+            names.add("test");
+        }
+        return List.copyOf(names);
+    }
+
+    private static void addEnvironmentNames(Set<String> names, Object value) {
+        if (value == null) {
+            return;
+        }
+        Stream.of(value.toString().split(","))
+                .map(String::trim)
+                .filter(name -> !name.isEmpty())
+                .forEach(names::add);
     }
 
     private static List<Path> dependencyClasspath(LaunchOptions options, List<ApplicationConfig> applicationConfigs) throws IOException {
@@ -332,10 +436,25 @@ public final class MicronautSourceLauncher {
             if (!Files.isRegularFile(configured)) {
                 throw new IllegalArgumentException("Dependency file does not exist: " + configured);
             }
-            ApplicationConfig dependencyConfig = ApplicationConfig.read(configured, configured.getFileName().toString());
+            ApplicationConfig dependencyConfig = dependencyConfig(configured);
             manifests.add(DependencyManifest.fromProperties(dependencyConfig.source(), dependencyConfig.properties()));
         }
         return List.copyOf(manifests);
+    }
+
+    private static ApplicationConfig dependencyConfig(Path path) throws IOException {
+        Map<String, PropertySourceLoader> loaders = applicationConfigLoaders();
+        String fileName = path.getFileName().toString();
+        int extensionSeparator = fileName.lastIndexOf('.');
+        if (extensionSeparator < 0) {
+            throw new IllegalArgumentException("Dependency file must use a supported config extension: " + path);
+        }
+        String extension = fileName.substring(extensionSeparator + 1);
+        PropertySourceLoader loader = loaders.get(extension);
+        if (loader == null) {
+            throw new IllegalArgumentException("Dependency file must use one of " + loaders.keySet() + ": " + path);
+        }
+        return ApplicationConfig.read(path, fileName, fileName.substring(0, extensionSeparator), loader, loaderOrder(loader));
     }
 
     private static List<Path> resolveDependencies(
@@ -649,17 +768,33 @@ public final class MicronautSourceLauncher {
     private record ResourceFile(String name, Path path) {
     }
 
+    private record ApplicationConfigResource(
+            String resourceName,
+            String configName,
+            PropertySourceLoader loader,
+            int order
+    ) {
+        private ApplicationConfig read(Path path) throws IOException {
+            return ApplicationConfig.read(path, resourceName, configName, loader, order);
+        }
+    }
+
     private record ApplicationConfig(String source, Map<String, Object> properties, PropertySource propertySource) {
-        private static ApplicationConfig read(Path path, String name) throws IOException {
-            YamlPropertySourceLoader loader = new YamlPropertySourceLoader(false);
+        private static ApplicationConfig read(
+                Path path,
+                String resourceName,
+                String configName,
+                PropertySourceLoader loader,
+                int order
+        ) throws IOException {
             Map<String, Object> properties;
             try (InputStream in = Files.newInputStream(path)) {
-                properties = Map.copyOf(loader.read(name, in));
+                properties = Map.copyOf(loader.read(configName, in));
             }
             return new ApplicationConfig(
                     path.toString(),
                     properties,
-                    PropertySource.of(name, properties, loader.getOrder())
+                    PropertySource.of(resourceName, properties, order)
             );
         }
     }

@@ -1,0 +1,8 @@
+warehouse:
+  name: guide-warehouse
+  zones:
+    - ambient
+    - frozen
+  limits:
+    max-items: 25
+    refrigerated: false

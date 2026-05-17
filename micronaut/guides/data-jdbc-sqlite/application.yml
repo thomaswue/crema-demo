@@ -1,0 +1,11 @@
+datasources:
+  default:
+    url: jdbc:sqlite:file:crema-guide-data?mode=memory&cache=shared
+    driverClassName: org.sqlite.JDBC
+    maximumPoolSize: 1
+    dialect: H2
+
+dependencies:
+  main:
+    - io.micronaut.data:micronaut-data-jdbc:4.14.4
+    - io.micronaut.sql:micronaut-jdbc-hikari:6.3.4
