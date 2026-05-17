@@ -15,17 +15,22 @@ import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
 import org.eclipse.aether.DefaultRepositorySystemSession;
 import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.artifact.DefaultArtifact;
+import org.eclipse.aether.collection.CollectRequest;
 import org.eclipse.aether.connector.basic.BasicRepositoryConnectorFactory;
+import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.impl.DefaultServiceLocator;
 import org.eclipse.aether.repository.Authentication;
 import org.eclipse.aether.repository.LocalRepository;
 import org.eclipse.aether.repository.Proxy;
 import org.eclipse.aether.repository.RemoteRepository;
 import org.eclipse.aether.resolution.ArtifactResult;
-import org.eclipse.aether.resolution.ArtifactRequest;
+import org.eclipse.aether.resolution.DependencyRequest;
+import org.eclipse.aether.resolution.DependencyResult;
 import org.eclipse.aether.spi.connector.RepositoryConnectorFactory;
 import org.eclipse.aether.spi.connector.transport.TransporterFactory;
 import org.eclipse.aether.transport.http.HttpTransporterFactory;
+import org.eclipse.aether.util.artifact.JavaScopes;
+import org.eclipse.aether.util.filter.DependencyFilterUtils;
 import org.eclipse.aether.util.repository.AuthenticationBuilder;
 import org.eclipse.aether.util.repository.DefaultProxySelector;
 import org.junit.jupiter.engine.JupiterTestEngine;
@@ -59,7 +64,6 @@ import javax.tools.SimpleJavaFileObject;
 import javax.tools.StandardJavaFileManager;
 import javax.tools.StandardLocation;
 import javax.tools.ToolProvider;
-import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -95,8 +99,6 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
-import org.w3c.dom.Element;
-import org.w3c.dom.Node;
 
 public final class MicronautSourceLauncher {
     private static final String LIB_INDEX = "launcher-libs.index";
@@ -340,182 +342,27 @@ public final class MicronautSourceLauncher {
             DependencyManifest manifest,
             List<DependencyCoordinate> dependencies
     ) {
-        failOnDirectVersionConflicts(manifest.source(), dependencies);
-
         RepositorySystem repositorySystem = newRepositorySystem();
         DefaultRepositorySystemSession session = newRepositorySystemSession(repositorySystem);
         List<RemoteRepository> repositories = remoteRepositories(manifest.repositories());
         LinkedHashSet<Path> classpath = new LinkedHashSet<>();
-        Map<String, String> selectedVersions = new HashMap<>();
-        List<DependencyCoordinate> pending = new ArrayList<>(dependencies);
-
-        for (DependencyCoordinate dependency : dependencies) {
-            selectedVersions.put(dependency.key(), dependency.version());
-        }
-
-        for (int index = 0; index < pending.size(); index++) {
-            DependencyCoordinate dependency = pending.get(index);
-            Path jar = resolveArtifact(repositorySystem, session, repositories, dependency, "jar");
-            classpath.add(jar);
-
-            Path pom = resolveArtifact(repositorySystem, session, repositories, dependency, "pom");
-            for (DependencyCoordinate transitive : readPomDependencies(pom)) {
-                String selectedVersion = selectedVersions.putIfAbsent(transitive.key(), transitive.version());
-                if (selectedVersion == null) {
-                    pending.add(transitive);
-                }
-            }
-        }
-
-        return List.copyOf(classpath);
-    }
-
-    private static Path resolveArtifact(
-            RepositorySystem repositorySystem,
-            DefaultRepositorySystemSession session,
-            List<RemoteRepository> repositories,
-            DependencyCoordinate dependency,
-            String extension
-    ) {
-        ArtifactRequest request = new ArtifactRequest(
-                new DefaultArtifact(dependency.groupId(), dependency.artifactId(), extension, dependency.version()),
-                repositories,
-                null
-        );
         try {
-            ArtifactResult result = repositorySystem.resolveArtifact(session, request);
-            return result.getArtifact().getFile().toPath().toAbsolutePath().normalize();
+            CollectRequest collectRequest = new CollectRequest()
+                    .setRepositories(repositories)
+                    .setDependencies(dependencies.stream()
+                            .map(DependencyCoordinate::dependency)
+                            .toList());
+            DependencyRequest dependencyRequest = new DependencyRequest(
+                    collectRequest,
+                    DependencyFilterUtils.classpathFilter(JavaScopes.COMPILE, JavaScopes.RUNTIME)
+            );
+            DependencyResult result = repositorySystem.resolveDependencies(session, dependencyRequest);
+            for (ArtifactResult artifactResult : result.getArtifactResults()) {
+                classpath.add(artifactResult.getArtifact().getFile().toPath().toAbsolutePath().normalize());
+            }
+            return List.copyOf(classpath);
         } catch (Exception e) {
-            throw new IllegalStateException("Cannot resolve Maven artifact "
-                    + dependency.groupId() + ":" + dependency.artifactId() + ":" + extension + ":" + dependency.version(), e);
-        }
-    }
-
-    private static List<DependencyCoordinate> readPomDependencies(Path pom) {
-        try (InputStream in = Files.newInputStream(pom)) {
-            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
-            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
-            factory.setFeature("http://xml.org/sax/features/external-general-entities", false);
-            factory.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
-            factory.setExpandEntityReferences(false);
-            Element project = factory.newDocumentBuilder().parse(in).getDocumentElement();
-            Map<String, String> properties = pomProperties(project);
-            Map<String, String> managedVersions = managedVersions(project, properties);
-            List<DependencyCoordinate> result = new ArrayList<>();
-            Optional<Element> dependencies = directChild(project, "dependencies");
-            if (dependencies.isEmpty()) {
-                return List.of();
-            }
-            for (Element dependency : directChildren(dependencies.get(), "dependency")) {
-                String scope = childText(dependency, "scope").orElse("compile");
-                String optional = childText(dependency, "optional").orElse("false");
-                String type = childText(dependency, "type").orElse("jar");
-                if ("test".equals(scope) || "provided".equals(scope) || "system".equals(scope)
-                        || "import".equals(scope) || "true".equals(optional) || !"jar".equals(type)) {
-                    continue;
-                }
-                String groupId = childText(dependency, "groupId")
-                        .map(value -> interpolate(value, properties))
-                        .orElseThrow(() -> new IllegalArgumentException(pom + ": Dependency is missing groupId."));
-                String artifactId = childText(dependency, "artifactId")
-                        .map(value -> interpolate(value, properties))
-                        .orElseThrow(() -> new IllegalArgumentException(pom + ": Dependency is missing artifactId."));
-                String version = childText(dependency, "version")
-                        .map(value -> interpolate(value, properties))
-                        .or(() -> Optional.ofNullable(managedVersions.get(groupId + ":" + artifactId)))
-                        .orElseThrow(() -> new IllegalArgumentException(pom + ": Dependency is missing version: "
-                                + groupId + ":" + artifactId));
-                result.add(new DependencyCoordinate(groupId, artifactId, version));
-            }
-            return result;
-        } catch (Exception e) {
-            throw new IllegalStateException("Cannot read Maven POM " + pom, e);
-        }
-    }
-
-    private static Map<String, String> pomProperties(Element project) {
-        Map<String, String> properties = new HashMap<>();
-        childText(project, "groupId").ifPresent(value -> properties.put("project.groupId", value));
-        childText(project, "artifactId").ifPresent(value -> properties.put("project.artifactId", value));
-        childText(project, "version").ifPresent(value -> properties.put("project.version", value));
-        directChild(project, "properties").ifPresent(propertiesElement -> {
-            for (Element property : directChildElements(propertiesElement)) {
-                properties.put(property.getTagName(), property.getTextContent().trim());
-            }
-        });
-        return properties;
-    }
-
-    private static Map<String, String> managedVersions(Element project, Map<String, String> properties) {
-        Map<String, String> managedVersions = new HashMap<>();
-        Optional<Element> dependencyManagement = directChild(project, "dependencyManagement");
-        if (dependencyManagement.isEmpty()) {
-            return managedVersions;
-        }
-        Optional<Element> dependencies = directChild(dependencyManagement.get(), "dependencies");
-        if (dependencies.isEmpty()) {
-            return managedVersions;
-        }
-        for (Element dependency : directChildren(dependencies.get(), "dependency")) {
-            Optional<String> groupId = childText(dependency, "groupId").map(value -> interpolate(value, properties));
-            Optional<String> artifactId = childText(dependency, "artifactId").map(value -> interpolate(value, properties));
-            Optional<String> version = childText(dependency, "version").map(value -> interpolate(value, properties));
-            if (groupId.isPresent() && artifactId.isPresent() && version.isPresent()) {
-                managedVersions.put(groupId.get() + ":" + artifactId.get(), version.get());
-            }
-        }
-        return managedVersions;
-    }
-
-    private static String interpolate(String value, Map<String, String> properties) {
-        String result = value;
-        for (Map.Entry<String, String> property : properties.entrySet()) {
-            result = result.replace("${" + property.getKey() + "}", property.getValue());
-        }
-        return result;
-    }
-
-    private static Optional<Element> directChild(Element parent, String tagName) {
-        for (Element child : directChildElements(parent)) {
-            if (child.getTagName().equals(tagName)) {
-                return Optional.of(child);
-            }
-        }
-        return Optional.empty();
-    }
-
-    private static List<Element> directChildren(Element parent, String tagName) {
-        return directChildElements(parent).stream()
-                .filter(child -> child.getTagName().equals(tagName))
-                .toList();
-    }
-
-    private static List<Element> directChildElements(Element parent) {
-        List<Element> result = new ArrayList<>();
-        for (Node child = parent.getFirstChild(); child != null; child = child.getNextSibling()) {
-            if (child instanceof Element element) {
-                result.add(element);
-            }
-        }
-        return result;
-    }
-
-    private static Optional<String> childText(Element parent, String tagName) {
-        return directChild(parent, tagName)
-                .map(Element::getTextContent)
-                .map(String::trim)
-                .filter(value -> !value.isEmpty());
-    }
-
-    private static void failOnDirectVersionConflicts(String source, List<DependencyCoordinate> dependencies) {
-        Map<String, String> versions = new HashMap<>();
-        for (DependencyCoordinate dependency : dependencies) {
-            String key = dependency.groupId() + ":" + dependency.artifactId();
-            String previous = versions.putIfAbsent(key, dependency.version());
-            if (previous != null && !previous.equals(dependency.version())) {
-                throw new IllegalArgumentException(source + ": Conflicting direct dependency versions for "
-                        + key + ": " + previous + " and " + dependency.version());
-            }
+            throw new IllegalStateException("Cannot resolve Maven dependencies from " + manifest.source(), e);
         }
     }
 
@@ -538,6 +385,7 @@ public final class MicronautSourceLauncher {
 
     private static DefaultRepositorySystemSession newRepositorySystemSession(RepositorySystem repositorySystem) {
         DefaultRepositorySystemSession session = MavenRepositorySystemUtils.newSession();
+        session.setSystemProperties(System.getProperties());
         LocalRepository localRepository = new LocalRepository(localRepositoryPath().toString());
         session.setLocalRepositoryManager(repositorySystem.newLocalRepositoryManager(session, localRepository));
         envProxySelector().ifPresent(session::setProxySelector);
@@ -2079,17 +1927,26 @@ public final class MicronautSourceLauncher {
         }
     }
 
-    private record DependencyCoordinate(String groupId, String artifactId, String version) {
-        private String key() {
-            return groupId + ":" + artifactId;
+    private record DependencyCoordinate(String value, DefaultArtifact artifact) {
+        private Dependency dependency() {
+            return new Dependency(artifact, JavaScopes.COMPILE);
         }
 
         private static DependencyCoordinate parse(String source, String value) {
-            String[] parts = value.split(":");
-            if (parts.length != 3 || parts[0].isBlank() || parts[1].isBlank() || parts[2].isBlank()) {
-                throw new IllegalArgumentException(source + ": Dependency coordinates must use groupId:artifactId:version syntax: " + value);
+            try {
+                DefaultArtifact artifact = new DefaultArtifact(value);
+                if (artifact.getGroupId().isBlank() ||
+                        artifact.getArtifactId().isBlank() ||
+                        artifact.getExtension().isBlank() ||
+                        artifact.getVersion().isBlank()) {
+                    throw new IllegalArgumentException("Missing groupId, artifactId, extension, or version.");
+                }
+                return new DependencyCoordinate(value, artifact);
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException(source
+                        + ": Dependency coordinates must use Maven syntax "
+                        + "groupId:artifactId[:extension[:classifier]]:version: " + value, e);
             }
-            return new DependencyCoordinate(parts[0], parts[1], parts[2]);
         }
     }
 }
