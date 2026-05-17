@@ -7,6 +7,8 @@ import io.micronaut.annotation.processing.PackageElementVisitorProcessor;
 import io.micronaut.annotation.processing.TypeElementVisitorProcessor;
 import io.micronaut.context.ApplicationContext;
 import io.micronaut.context.ApplicationContextBuilder;
+import io.micronaut.context.env.PropertySource;
+import io.micronaut.context.env.yaml.YamlPropertySourceLoader;
 import io.micronaut.core.io.service.DynamicServiceLoaderBridge;
 import io.micronaut.runtime.server.EmbeddedServer;
 import org.apache.maven.repository.internal.MavenRepositorySystemUtils;
@@ -119,6 +121,8 @@ public final class MicronautSourceLauncher {
         List<Path> sourceFiles = collectSourceFiles(options.sourcePaths());
         List<Path> testSourceFiles = options.test() ? collectSourceFiles(options.testSourcePaths()) : List.of();
         List<ResourceFile> resourceFiles = collectResourceFiles(options.sourcePaths());
+        List<ApplicationConfig> applicationConfigs = applicationConfigs(resourceFiles);
+        List<ResourceFile> classpathResourceFiles = classpathResourceFiles(resourceFiles);
         List<String> annotationPatterns = annotationPatterns(sourceFiles, options.annotationPatterns());
         List<String> testAnnotationPatterns = options.test()
                 ? annotationPatterns(concat(sourceFiles, testSourceFiles), options.annotationPatterns())
@@ -130,7 +134,7 @@ public final class MicronautSourceLauncher {
 
         long startNanos = System.nanoTime();
         long phaseStartNanos = System.nanoTime();
-        List<Path> dependencyClasspath = dependencyClasspath(options);
+        List<Path> dependencyClasspath = dependencyClasspath(options, applicationConfigs);
         timings.record("resolve dependencies", phaseStartNanos);
         phaseStartNanos = System.nanoTime();
         InMemoryClassPath launcherClasspath = InMemoryClassPath.fromLauncherResources(options.test());
@@ -144,19 +148,19 @@ public final class MicronautSourceLauncher {
                 dependencyClasspath,
                 annotationPatterns,
                 testAnnotationPatterns,
-                resourceFiles
+                classpathResourceFiles
         );
         timings.record("javac and annotation processing", phaseStartNanos);
-        loadBuiltInJdbcDrivers(resourceFiles, options.properties());
+        loadBuiltInJdbcDrivers(applicationConfigs, classpathResourceFiles, options.properties());
         if (options.test()) {
-            int failures = runTests(testSourceFiles, compiledOutput, dependencyClasspath, options.port(), options.properties(), timings);
+            int failures = runTests(testSourceFiles, compiledOutput, dependencyClasspath, applicationConfigs, options.port(), options.properties(), timings);
             timings.print();
             System.exit(failures > 0 ? 1 : 0);
             return;
         }
 
         phaseStartNanos = System.nanoTime();
-        StartedServer startedServer = startServer(compiledOutput, dependencyClasspath, options.port(), options.properties(), timings);
+        StartedServer startedServer = startServer(compiledOutput, dependencyClasspath, applicationConfigs, options.port(), options.properties(), timings);
         timings.record("server setup total", phaseStartNanos);
         long elapsedMillis = Duration.ofNanos(System.nanoTime() - startNanos).toMillis();
 
@@ -278,8 +282,28 @@ public final class MicronautSourceLauncher {
         }
     }
 
-    private static List<Path> dependencyClasspath(LaunchOptions options) throws IOException {
-        List<DependencyManifest> manifests = dependencyManifests(options);
+    private static List<ApplicationConfig> applicationConfigs(List<ResourceFile> resourceFiles) throws IOException {
+        List<ApplicationConfig> configs = new ArrayList<>();
+        for (ResourceFile resourceFile : resourceFiles) {
+            if (isRootApplicationYaml(resourceFile.name())) {
+                configs.add(ApplicationConfig.read(resourceFile.path(), resourceFile.name()));
+            }
+        }
+        return List.copyOf(configs);
+    }
+
+    private static List<ResourceFile> classpathResourceFiles(List<ResourceFile> resourceFiles) {
+        return resourceFiles.stream()
+                .filter(resourceFile -> !isRootApplicationYaml(resourceFile.name()))
+                .toList();
+    }
+
+    private static boolean isRootApplicationYaml(String resourceName) {
+        return APPLICATION_CONFIG_FILES.contains(resourceName);
+    }
+
+    private static List<Path> dependencyClasspath(LaunchOptions options, List<ApplicationConfig> applicationConfigs) throws IOException {
+        List<DependencyManifest> manifests = dependencyManifests(options, applicationConfigs);
         if (manifests.isEmpty()) {
             return List.of();
         }
@@ -293,70 +317,23 @@ public final class MicronautSourceLauncher {
         return resolveDependencies(manifest, dependencies);
     }
 
-    private static List<DependencyManifest> dependencyManifests(LaunchOptions options) throws IOException {
+    private static List<DependencyManifest> dependencyManifests(LaunchOptions options, List<ApplicationConfig> applicationConfigs) throws IOException {
         if (options.disableDependencies()) {
             return List.of();
         }
         List<DependencyManifest> manifests = new ArrayList<>();
-        Optional<Path> applicationConfig = defaultApplicationConfig(options);
-        if (applicationConfig.isPresent()) {
-            manifests.add(DependencyManifest.read(applicationConfig.get()));
+        for (ApplicationConfig applicationConfig : applicationConfigs) {
+            manifests.add(DependencyManifest.fromProperties(applicationConfig.source(), applicationConfig.properties()));
         }
         if (options.depsFile().isPresent()) {
             Path configured = options.depsFile().get().toAbsolutePath().normalize();
             if (!Files.isRegularFile(configured)) {
                 throw new IllegalArgumentException("Dependency file does not exist: " + configured);
             }
-            manifests.add(DependencyManifest.read(configured));
+            ApplicationConfig dependencyConfig = ApplicationConfig.read(configured, configured.getFileName().toString());
+            manifests.add(DependencyManifest.fromProperties(dependencyConfig.source(), dependencyConfig.properties()));
         }
         return List.copyOf(manifests);
-    }
-
-    private static Optional<Path> defaultApplicationConfig(LaunchOptions options) throws IOException {
-        Path root = commonSourceRoot(options.sourcePaths());
-        for (String fileName : APPLICATION_CONFIG_FILES) {
-            Path candidate = root.resolve(fileName);
-            if (Files.isRegularFile(candidate)) {
-                return Optional.of(candidate);
-            }
-        }
-        return Optional.empty();
-    }
-
-    private static Path commonSourceRoot(List<Path> sourcePaths) throws IOException {
-        Path common = null;
-        for (Path sourcePath : sourcePaths) {
-            Path path = sourcePath.toAbsolutePath().normalize();
-            Path root;
-            if (Files.isDirectory(path)) {
-                root = path;
-            } else if (Files.isRegularFile(path)) {
-                root = path.getParent();
-            } else {
-                throw new IllegalArgumentException("Source path does not exist: " + path);
-            }
-
-            common = common == null ? root : commonPath(common, root);
-        }
-        if (common == null) {
-            throw new IllegalArgumentException("No source paths provided.");
-        }
-        return common;
-    }
-
-    private static Path commonPath(Path left, Path right) {
-        Path leftRoot = left.getRoot();
-        Path rightRoot = right.getRoot();
-        if (leftRoot == null || !leftRoot.equals(rightRoot)) {
-            return left.toAbsolutePath().getRoot();
-        }
-
-        Path common = leftRoot;
-        int max = Math.min(left.getNameCount(), right.getNameCount());
-        for (int i = 0; i < max && left.getName(i).equals(right.getName(i)); i++) {
-            common = common.resolve(left.getName(i));
-        }
-        return common;
     }
 
     private static List<Path> resolveDependencies(
@@ -696,12 +673,14 @@ public final class MicronautSourceLauncher {
 
                 import io.micronaut.context.ApplicationContext;
                 import io.micronaut.context.DefaultApplicationContextBuilder;
+                import io.micronaut.context.env.PropertySource;
                 import java.lang.reflect.InvocationTargetException;
                 import java.util.Map;
 
                 public final class SourceLauncherContextBuilder extends DefaultApplicationContextBuilder {
                     public SourceLauncherContextBuilder() {
                         classLoader(applicationClassLoader());
+                        propertySources(testPropertySources());
                         properties(testProperties());
                     }
 
@@ -743,6 +722,28 @@ public final class MicronautSourceLauncher {
 
                     private static ClassLoader applicationClassLoader() {
                         return Thread.currentThread().getContextClassLoader();
+                    }
+
+                    private static PropertySource[] testPropertySources() {
+                        try {
+                            Class<?> bridge = Class.forName(
+                                    "io.micronaut.core.io.service.DynamicServiceLoaderBridge",
+                                    true,
+                                    SourceLauncherContextBuilder.class.getClassLoader()
+                            );
+                            return (PropertySource[]) bridge.getMethod("sourceLauncherTestPropertySources").invoke(null);
+                        } catch (ClassNotFoundException | NoSuchMethodException | IllegalAccessException e) {
+                            throw new IllegalStateException("Cannot access source launcher test property sources.", e);
+                        } catch (InvocationTargetException e) {
+                            Throwable cause = e.getCause();
+                            if (cause instanceof RuntimeException runtimeException) {
+                                throw runtimeException;
+                            }
+                            if (cause instanceof Error error) {
+                                throw error;
+                            }
+                            throw new IllegalStateException("Cannot read source launcher test property sources.", cause);
+                        }
                     }
 
                     @SuppressWarnings("unchecked")
@@ -800,8 +801,33 @@ public final class MicronautSourceLauncher {
     private record ResourceFile(String name, Path path) {
     }
 
-    private static void loadBuiltInJdbcDrivers(List<ResourceFile> resourceFiles, Map<String, Object> properties) throws IOException {
-        if (usesBuiltInSqliteDriver(resourceFiles, properties)) {
+    private record ApplicationConfig(String source, Map<String, Object> properties, PropertySource propertySource) {
+        private static ApplicationConfig read(Path path, String name) throws IOException {
+            YamlPropertySourceLoader loader = new YamlPropertySourceLoader(false);
+            Map<String, Object> properties;
+            try (InputStream in = Files.newInputStream(path)) {
+                properties = Map.copyOf(loader.read(name, in));
+            }
+            return new ApplicationConfig(
+                    path.toString(),
+                    properties,
+                    PropertySource.of(name, properties, loader.getOrder())
+            );
+        }
+    }
+
+    private static PropertySource[] propertySources(List<ApplicationConfig> applicationConfigs) {
+        return applicationConfigs.stream()
+                .map(ApplicationConfig::propertySource)
+                .toArray(PropertySource[]::new);
+    }
+
+    private static void loadBuiltInJdbcDrivers(
+            List<ApplicationConfig> applicationConfigs,
+            List<ResourceFile> resourceFiles,
+            Map<String, Object> properties
+    ) throws IOException {
+        if (usesBuiltInSqliteDriver(applicationConfigs, resourceFiles, properties)) {
             try {
                 Class.forName(org.sqlite.JDBC.class.getName(), true, MicronautSourceLauncher.class.getClassLoader());
             } catch (ClassNotFoundException e) {
@@ -810,7 +836,19 @@ public final class MicronautSourceLauncher {
         }
     }
 
-    private static boolean usesBuiltInSqliteDriver(List<ResourceFile> resourceFiles, Map<String, Object> properties) throws IOException {
+    private static boolean usesBuiltInSqliteDriver(
+            List<ApplicationConfig> applicationConfigs,
+            List<ResourceFile> resourceFiles,
+            Map<String, Object> properties
+    ) throws IOException {
+        for (ApplicationConfig applicationConfig : applicationConfigs) {
+            for (Map.Entry<String, Object> entry : applicationConfig.properties().entrySet()) {
+                if (mentionsBuiltInSqliteDriver(entry.getKey()) ||
+                        mentionsBuiltInSqliteDriver(String.valueOf(entry.getValue()))) {
+                    return true;
+                }
+            }
+        }
         for (ResourceFile resourceFile : resourceFiles) {
             String content = new String(Files.readAllBytes(resourceFile.path()), StandardCharsets.ISO_8859_1);
             if (mentionsBuiltInSqliteDriver(content)) {
@@ -951,6 +989,7 @@ public final class MicronautSourceLauncher {
     private static StartedServer startServer(
             InMemoryCompilationOutput compiledOutput,
             List<Path> dependencyClasspath,
+            List<ApplicationConfig> applicationConfigs,
             int port,
             Map<String, Object> launchProperties,
             StartupTimings timings
@@ -964,6 +1003,7 @@ public final class MicronautSourceLauncher {
 
         ApplicationContextBuilder builder = ApplicationContext.builder()
                 .classLoader(applicationClassLoader)
+                .propertySources(propertySources(applicationConfigs))
                 .properties(properties);
         phaseStartNanos = System.nanoTime();
         ApplicationContext context = builder.build();
@@ -1008,6 +1048,7 @@ public final class MicronautSourceLauncher {
             List<Path> testSourceFiles,
             InMemoryCompilationOutput compiledOutput,
             List<Path> dependencyClasspath,
+            List<ApplicationConfig> applicationConfigs,
             int port,
             Map<String, Object> launchProperties,
             StartupTimings timings
@@ -1018,7 +1059,10 @@ public final class MicronautSourceLauncher {
         Thread.currentThread().setContextClassLoader(applicationClassLoader);
         timings.record("test classloader setup", phaseStartNanos);
 
-        DynamicServiceLoaderBridge.configureSourceLauncherTestProperties(launchProperties(port, launchProperties));
+        DynamicServiceLoaderBridge.configureSourceLauncherTestProperties(
+                propertySources(applicationConfigs),
+                launchProperties(port, launchProperties)
+        );
         try {
             List<Class<?>> testClasses = new ArrayList<>();
             for (Path testSourceFile : testSourceFiles) {
@@ -1953,62 +1997,21 @@ public final class MicronautSourceLauncher {
             List<String> testDependencies,
             List<String> repositories
     ) {
-        private static DependencyManifest read(Path file) throws IOException {
-            List<String> dependencies = new ArrayList<>();
-            List<String> testDependencies = new ArrayList<>();
-            List<String> repositories = new ArrayList<>();
-            String topLevelSection = null;
-            String dependencySection = null;
-            int lineNumber = 0;
-            for (String rawLine : Files.readAllLines(file, StandardCharsets.UTF_8)) {
-                lineNumber++;
-                String line = stripComment(rawLine).trim();
-                if (line.isEmpty()) {
-                    continue;
-                }
-                int indent = leadingSpaces(rawLine);
-                if (indent == 0 && line.endsWith(":")) {
-                    topLevelSection = line.substring(0, line.length() - 1).trim();
-                    dependencySection = "dependencies".equals(topLevelSection) ? "main" : null;
-                    continue;
-                }
-
-                if ("dependencies".equals(topLevelSection)) {
-                    if (indent == 2 && line.endsWith(":")) {
-                        dependencySection = line.substring(0, line.length() - 1).trim();
-                        switch (dependencySection) {
-                            case "main", "test", "repositories" -> {
-                            }
-                            default -> throw new IllegalArgumentException(file + ":" + lineNumber
-                                    + ": Unsupported dependencies section: " + dependencySection);
-                        }
-                        continue;
-                    }
-                    if ((indent == 2 || indent == 4) && line.startsWith("- ")) {
-                        String value = dependencyManifestValue(file, lineNumber, line);
-                        switch (dependencySection) {
-                            case "main" -> dependencies.add(value);
-                            case "test" -> testDependencies.add(value);
-                            case "repositories" -> repositories.add(value);
-                            default -> throw new IllegalStateException("Unexpected dependencies section: " + dependencySection);
-                        }
-                        continue;
-                    }
-                    throw new IllegalArgumentException(file + ":" + lineNumber
-                            + ": Expected dependencies.main, dependencies.test, dependencies.repositories, or a dependency list item.");
-                }
-
-                if (("testDependencies".equals(topLevelSection) || "repositories".equals(topLevelSection)) && line.startsWith("- ")) {
-                    String value = dependencyManifestValue(file, lineNumber, line);
-                    if ("testDependencies".equals(topLevelSection)) {
-                        testDependencies.add(value);
-                    } else {
-                        repositories.add(value);
-                    }
-                }
+        private static DependencyManifest fromProperties(String source, Map<String, Object> properties) {
+            List<String> dependencies = dependencyValues(source, "dependencies.main", properties.get("dependencies.main"));
+            if (dependencies.isEmpty()) {
+                dependencies = dependencyValues(source, "dependencies", properties.get("dependencies"));
+            }
+            List<String> testDependencies = dependencyValues(source, "dependencies.test", properties.get("dependencies.test"));
+            if (testDependencies.isEmpty()) {
+                testDependencies = dependencyValues(source, "testDependencies", properties.get("testDependencies"));
+            }
+            List<String> repositories = dependencyValues(source, "dependencies.repositories", properties.get("dependencies.repositories"));
+            if (repositories.isEmpty()) {
+                repositories = dependencyValues(source, "repositories", properties.get("repositories"));
             }
             return new DependencyManifest(
-                    file.toString(),
+                    source,
                     List.copyOf(dependencies),
                     List.copyOf(testDependencies),
                     List.copyOf(repositories)
@@ -2044,42 +2047,35 @@ public final class MicronautSourceLauncher {
                     .toList();
         }
 
-        private static String dependencyManifestValue(Path file, int lineNumber, String line) {
-            String value = unquote(line.substring(2).trim());
-            if (value.isEmpty()) {
-                throw new IllegalArgumentException(file + ":" + lineNumber + ": Empty dependency manifest value.");
+        private static List<String> dependencyValues(String source, String property, Object value) {
+            if (value == null) {
+                return List.of();
             }
-            return value;
-        }
-
-        private static int leadingSpaces(String line) {
-            int spaces = 0;
-            while (spaces < line.length() && line.charAt(spaces) == ' ') {
-                spaces++;
-            }
-            return spaces;
-        }
-
-        private static String stripComment(String line) {
-            int comment = line.indexOf('#');
-            if (comment < 0) {
-                return line;
-            }
-            if (comment == 0 || Character.isWhitespace(line.charAt(comment - 1))) {
-                return line.substring(0, comment);
-            }
-            return line;
-        }
-
-        private static String unquote(String value) {
-            if (value.length() >= 2) {
-                char first = value.charAt(0);
-                char last = value.charAt(value.length() - 1);
-                if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
-                    return value.substring(1, value.length() - 1);
+            List<String> values = new ArrayList<>();
+            if (value instanceof Iterable<?> iterable) {
+                for (Object item : iterable) {
+                    values.add(dependencyValue(source, property, item));
                 }
+            } else if (value.getClass().isArray()) {
+                int length = java.lang.reflect.Array.getLength(value);
+                for (int i = 0; i < length; i++) {
+                    values.add(dependencyValue(source, property, java.lang.reflect.Array.get(value, i)));
+                }
+            } else {
+                values.add(dependencyValue(source, property, value));
             }
-            return value;
+            return List.copyOf(values);
+        }
+
+        private static String dependencyValue(String source, String property, Object value) {
+            if (value == null) {
+                throw new IllegalArgumentException(source + ": Empty dependency value in " + property + ".");
+            }
+            String string = value.toString().trim();
+            if (string.isEmpty()) {
+                throw new IllegalArgumentException(source + ": Empty dependency value in " + property + ".");
+            }
+            return string;
         }
     }
 

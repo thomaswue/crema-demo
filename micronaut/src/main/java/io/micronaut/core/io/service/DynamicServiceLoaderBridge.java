@@ -2,6 +2,7 @@ package io.micronaut.core.io.service;
 
 import io.micronaut.context.ApplicationContext;
 import io.micronaut.context.DefaultBeanContext;
+import io.micronaut.context.env.PropertySource;
 import io.micronaut.core.beans.BeanIntrospectionReference;
 import io.micronaut.core.beans.BeanIntrospector;
 import io.micronaut.inject.BeanDefinitionReference;
@@ -23,6 +24,7 @@ public final class DynamicServiceLoaderBridge {
     private static final String BEAN_DEFINITION_REFERENCE = "io.micronaut.inject.BeanDefinitionReference";
     private static final String BEAN_INTROSPECTION_REFERENCE = "io.micronaut.core.beans.BeanIntrospectionReference";
     private static Map<String, Object> sourceLauncherTestProperties = Map.of();
+    private static PropertySource[] sourceLauncherTestPropertySources = new PropertySource[0];
 
     private DynamicServiceLoaderBridge() {
     }
@@ -48,7 +50,8 @@ public final class DynamicServiceLoaderBridge {
         addGeneratedIntrospectionReferences(classLoader, generatedServiceClassNames(classLoader, BEAN_INTROSPECTION_REFERENCE));
     }
 
-    public static void configureSourceLauncherTestProperties(Map<String, Object> properties) {
+    public static void configureSourceLauncherTestProperties(PropertySource[] propertySources, Map<String, Object> properties) {
+        sourceLauncherTestPropertySources = propertySources.clone();
         sourceLauncherTestProperties = Map.copyOf(properties);
     }
 
@@ -56,7 +59,12 @@ public final class DynamicServiceLoaderBridge {
         return sourceLauncherTestProperties;
     }
 
+    public static PropertySource[] sourceLauncherTestPropertySources() {
+        return sourceLauncherTestPropertySources.clone();
+    }
+
     public static void clearSourceLauncherTestProperties() {
+        sourceLauncherTestPropertySources = new PropertySource[0];
         sourceLauncherTestProperties = Map.of();
     }
 
