@@ -122,23 +122,31 @@ be supplied with `--property key=value` or `-Dkey=value`.
 
 ## Maven Dependencies
 
-For source apps that need additional Maven dependencies, add them to
-`application.yml` in the source directory passed to the launcher:
+For source apps that need additional runtime Maven dependencies, add them to
+`application.yml` next to the source directory passed to the launcher:
 
 ```yaml
 dependencies:
   main:
     - org.apache.commons:commons-text:1.12.0
-  test:
-    - org.assertj:assertj-core:3.27.3
   repositories:
     - central
+```
+
+Put test-only dependencies in `application-test.yml`, because test mode enables
+Micronaut's `test` environment:
+
+```yaml
+dependencies:
+  test:
+    - org.assertj:assertj-core:3.27.3
 ```
 
 The launcher resolves those dependencies with Maven Resolver baked into the
 launcher, adds the resolved jars to the `javac` classpath, and loads them into
 the source application classloader at runtime. `dependencies.test` is only used
-with `--test`. Maven itself does not need to be installed to run the launcher.
+with `--test`, and is normally declared in `application-test.yml`. Maven itself
+does not need to be installed to run the launcher.
 Dependencies are cached in the normal local Maven repository, defaulting to
 `~/.m2/repository` or `-Dmaven.repo.local=...`. HTTP proxy settings can be
 supplied through the usual `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`
