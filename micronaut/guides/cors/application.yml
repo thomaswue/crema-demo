@@ -1,0 +1,10 @@
+micronaut:
+  server:
+    cors:
+      enabled: true
+      localhost-pass-through: true
+      configurations:
+        guide:
+          allowed-origins: https://example.com
+          allowed-methods: GET
+          allowed-headers: Content-Type

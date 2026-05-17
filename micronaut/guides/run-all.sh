@@ -10,7 +10,12 @@ for guide in \
   validation \
   http-client \
   static-resources \
-  data-jdbc-sqlite
+  data-jdbc-sqlite \
+  error-handling \
+  content-negotiation \
+  cors \
+  server-filter-request \
+  scheduled
 do
   echo "== $guide =="
   ./run-jvm.sh --test --port 0 "guides/$guide/src" -- "guides/$guide/test"

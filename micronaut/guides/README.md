@@ -1,14 +1,16 @@
 # Micronaut guide examples
 
 This directory contains guide-inspired source applications that run directly
-through the `micronaut` source launcher. Each guide is a plain directory with
-`src` and `test` subdirectories rather than a Maven or Gradle project.
+through the `micronaut` source launcher. Each guide is a plain directory with a
+`src` subdirectory, an optional `test` subdirectory, and an `application.yml` at
+the guide root when configuration is needed.
 
 The Micronaut guides index was reviewed on 2026-05-17. The website feed
 currently lists 173 guide entries. The examples here start with guide areas that
 fit the current launcher: controllers, Micronaut Test, dependency injection,
-configuration properties, validation, HTTP clients, static resources, and
-Micronaut Data JDBC with SQLite.
+configuration properties, validation, HTTP clients, static resources, error
+handling, content negotiation, CORS, server filters, scheduling, and Micronaut
+Data JDBC with SQLite.
 
 The website guide list can be refreshed with:
 
@@ -28,6 +30,11 @@ curl -fsSL https://guides.micronaut.io/latest/feed.json \
 | `http-client` | HTTP Client | `./micronaut --test --port 0 guides/http-client/src -- guides/http-client/test` |
 | `static-resources` | Server-Side HTML / Static Resources | `./micronaut --test --port 0 guides/static-resources/src -- guides/static-resources/test` |
 | `data-jdbc-sqlite` | Data JDBC | `./micronaut --test --port 0 guides/data-jdbc-sqlite/src -- guides/data-jdbc-sqlite/test` |
+| `error-handling` | HTTP Server / Error Handling | `./micronaut --test --port 0 guides/error-handling/src -- guides/error-handling/test` |
+| `content-negotiation` | HTTP Server / Content Negotiation | `./micronaut --test --port 0 guides/content-negotiation/src -- guides/content-negotiation/test` |
+| `cors` | HTTP Server / CORS | `./micronaut --test --port 0 guides/cors/src -- guides/cors/test` |
+| `server-filter-request` | HTTP Server / Filters | `./micronaut --test --port 0 guides/server-filter-request/src -- guides/server-filter-request/test` |
+| `scheduled` | Scheduling | `./micronaut --test --port 0 guides/scheduled/src -- guides/scheduled/test` |
 
 ## Website guide IDs covered or partially covered
 
@@ -38,15 +45,16 @@ curl -fsSL https://guides.micronaut.io/latest/feed.json \
 - [x] `micronaut-http-client` - mapped by `http-client`
 - [x] `micronaut-static-resources` - mapped by `static-resources`
 - [x] `micronaut-data-jdbc-repository` - mapped by `data-jdbc-sqlite`
+- [x] `micronaut-error-handling` - mapped by `error-handling`
+- [x] `micronaut-content-negotiation` - mapped by `content-negotiation`
+- [x] `micronaut-cors` - mapped by `cors`
+- [x] `micronaut-server-filter-request` - mapped by `server-filter-request`
+- [x] `micronaut-scheduled` - mapped by `scheduled`
 
 ## Guide coverage backlog
 
 Good next candidates:
 
-- `micronaut-error-handling`
-- `micronaut-cors`
-- `micronaut-content-negotiation`
-- `micronaut-server-filter-request`
 - HTTP server health and CORS, once management/security module dependencies are
   exercised through the resolver.
 - `micronaut-websocket`, because the launcher already bakes in Micronaut

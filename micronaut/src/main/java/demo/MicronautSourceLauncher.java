@@ -244,6 +244,7 @@ public final class MicronautSourceLauncher {
             if (Files.isRegularFile(path)) {
                 collectSiblingApplicationResource(path, resources);
             } else if (Files.isDirectory(path)) {
+                collectSiblingApplicationResource(path, resources);
                 try (Stream<Path> files = Files.walk(path)) {
                     for (Path file : files.filter(Files::isRegularFile).sorted().toList()) {
                         if (isSourceResource(file)) {

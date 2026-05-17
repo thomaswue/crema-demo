@@ -257,7 +257,8 @@ declarative HTTP clients, validation of JSON request bodies, and Micronaut Data
 JDBC with SQLite configured through `application.yml`.
 
 The `guides` directory contains guide-inspired examples. Each guide has its own
-`src` and `test` directories:
+`src` directory, optional `test` directory, and a guide-root `application.yml`
+when configuration is needed:
 
 ```sh
 ./guides/run-all.sh
@@ -265,7 +266,8 @@ The `guides` directory contains guide-inspired examples. Each guide has its own
 
 Those examples currently cover creating a first app, dependency injection,
 configuration properties with `application-test.yml`, validation, declarative
-HTTP clients, static resources, and Micronaut Data JDBC with SQLite.
+HTTP clients, static resources, error handling, content negotiation, CORS,
+server filters, scheduling, and Micronaut Data JDBC with SQLite.
 
 The SQLite JDBC driver is built into the launcher because Xerial SQLite uses a
 native library and Native Image JNI metadata. The Data/SQLite example still uses
