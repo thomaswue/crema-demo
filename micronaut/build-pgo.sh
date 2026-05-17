@@ -45,7 +45,7 @@ while [ "$run" -le "$TRAIN_RUNS" ]; do
     profile_file="$PROFILE_DIR/$PROFILE_NAME-$run_id.iprof"
     train_log="$TRAIN_LOG_DIR/$PROFILE_NAME-$run_id.log"
 
-    ./micronaut-profiled -XX:ProfilesDumpFile="$profile_file" --port "$run_port" examples/hello > "$train_log" 2>&1 &
+    ./micronaut-profiled -XX:ProfilesDumpFile="$profile_file" --port "$run_port" examples/hello/src > "$train_log" 2>&1 &
     server_pid=$!
 
     cleanup() {

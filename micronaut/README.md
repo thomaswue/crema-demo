@@ -44,7 +44,7 @@ To build a PGO-optimized launcher trained on the hello world controller:
 ```
 
 This first builds `./micronaut-profiled` with sampled PGO collection, then runs
-several fresh startup-only training launches against `examples/hello`. By
+several fresh startup-only training launches against `examples/hello/src`. By
 default, each training launch is stopped immediately after the startup line is
 printed, so the collected profiles are biased toward launcher-library indexing,
 javac parsing and annotation processing, and Micronaut bootstrap rather than
@@ -58,7 +58,7 @@ If you also want the profile to include request handling, set
 For faster development, run the launcher on the JVM:
 
 ```sh
-./run-jvm.sh examples/hello
+./run-jvm.sh examples/hello/src
 ```
 
 ## Run
@@ -86,14 +86,14 @@ public final class HelloController {
 Run that file directly:
 
 ```sh
-./micronaut HelloController.java
+./micronaut examples/minimal/src/HelloController.java
 curl http://localhost:8080/hello
 ```
 
 Or run one of the checked-in example directories:
 
 ```sh
-./micronaut examples/hello
+./micronaut examples/hello/src
 curl http://localhost:8080/hello
 ```
 
@@ -106,7 +106,7 @@ hello world
 Use another port if needed:
 
 ```sh
-./micronaut --port 9090 examples/hello
+./micronaut --port 9090 examples/hello/src
 ```
 
 The launcher accepts one or more Java source files or directories. Directories
@@ -157,14 +157,14 @@ in the common root of the application source paths. Use an explicit additional
 dependency file or disable dependency discovery if needed:
 
 ```sh
-./micronaut --deps-file extra-dependencies.yml dependency-demo
-./micronaut --no-dependencies examples/hello
+./micronaut --deps-file extra-dependencies.yml examples/dependency/src
+./micronaut --no-dependencies examples/hello/src
 ```
 
 Run the checked-in dependency demo:
 
 ```sh
-./micronaut dependency-demo
+./micronaut examples/dependency/src
 curl http://localhost:8080/dependency/escape
 ```
 
@@ -214,7 +214,7 @@ final class HelloControllerTest {
 Run the checked-in test from source:
 
 ```sh
-./micronaut --test examples/hello -- tests/hello
+./micronaut --test examples/hello/src -- examples/hello/test
 ```
 
 For a regular Maven/JVM comparison, see `../micronaut-reference`:
@@ -226,37 +226,37 @@ For a regular Maven/JVM comparison, see `../micronaut-reference`:
 ## Examples
 
 ```sh
-./micronaut examples/hello
+./micronaut examples/hello/src
 curl http://localhost:8080/hello
 
-./micronaut --port 8081 examples/parameters
+./micronaut --port 8081 examples/parameters/src
 curl http://localhost:8081/greet/Ada
 
-./micronaut --port 8082 examples/json
+./micronaut --port 8082 examples/json/src
 curl http://localhost:8082/message/crema
 
-./micronaut --port 8083 examples/injection
+./micronaut --port 8083 examples/injection/src
 curl http://localhost:8083/injection/Grace
 
 ./micronaut --port 8084 \
   --property warehouse.name=Crema \
   --property warehouse.limits.max-items=42 \
   --property warehouse.limits.refrigerated=true \
-  examples/configuration
+  examples/configuration/src
 curl http://localhost:8084/warehouse/summary
 
-./micronaut --port 8085 examples/client
+./micronaut --port 8085 examples/client/src
 curl http://localhost:8085/client/greet/Turing
 
-./micronaut --port 8086 examples/validation
+./micronaut --port 8086 examples/validation/src
 curl -H 'Content-Type: application/json' \
   -d '{"title":"Native Micronaut","pages":123}' \
   http://localhost:8086/books
 
-./micronaut --port 8087 examples/data-sqlite
+./micronaut --port 8087 examples/data-sqlite/src
 curl http://localhost:8087/books
 
-./micronaut --test --port 0 examples/data-sqlite -- tests/data-sqlite
+./micronaut --test --port 0 examples/data-sqlite/src -- examples/data-sqlite/test
 ```
 
 The examples cover a plain text controller, path variables, JSON serialization,
@@ -280,16 +280,6 @@ server filters, scheduling, and Micronaut Data JDBC with SQLite.
 The SQLite JDBC driver is built into the launcher because Xerial SQLite uses a
 native library and Native Image JNI metadata. The Data/SQLite example still uses
 `application.yml` for the Micronaut Data JDBC and Hikari modules.
-
-All examples can also be launched together:
-
-```sh
-./micronaut --port 8080 \
-  --property warehouse.name=Crema \
-  --property warehouse.limits.max-items=42 \
-  --property warehouse.limits.refrigerated=true \
-  examples
-```
 
 By default, the launcher infers Micronaut annotation-processing packages from
 the source files. Use `--package demo` or `--package com.example,com.other`
