@@ -14,11 +14,13 @@ The launcher also bakes in Micronaut validation, the declarative HTTP client,
 and Jackson support so guide-style examples can run from source.
 
 For the native launcher, embedded Micronaut and compiler dependencies are
-indexed from the image resources and served to `javac` through an in-memory file
-manager. Dynamically compiled application/test classes and Micronaut-generated
-service metadata are also captured in memory and loaded through the source
-application classloader. No dependency jars or generated class files are
-extracted to disk at startup.
+pre-indexed at build time and served to `javac` through an in-memory file
+manager. The launcher uses build-generated role metadata to expose main
+compiler libraries by default and test compiler libraries only for `--test`.
+Dynamically compiled application/test classes and Micronaut-generated service
+metadata are also captured in memory and loaded through the source application
+classloader. No dependency jars or generated class files are extracted to disk
+at startup.
 
 ## Requirements
 

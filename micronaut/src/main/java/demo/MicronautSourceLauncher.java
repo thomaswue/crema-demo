@@ -104,7 +104,8 @@ import java.util.zip.Inflater;
 import java.util.zip.InflaterInputStream;
 
 public final class MicronautSourceLauncher {
-    private static final String LIB_INDEX = "launcher-libs.index";
+    private static final String LIB_MANIFEST = "launcher-libs.manifest";
+    private static final String LIB_CLASS_INDEX = "launcher-libs.classes";
     private static final String APPLICATION_CONFIG_ROOT = "application";
     private static final List<String> APPLICATION_CONFIG_EXTENSIONS = List.of("yml", "yaml", "properties", "json");
     private static final String SOURCE_LAUNCHER_CONTEXT_BUILDER = "io.crema.micronaut.test.SourceLauncherContextBuilder";
@@ -196,10 +197,10 @@ public final class MicronautSourceLauncher {
         }
     }
 
-    private static List<String> readLibIndex(ClassLoader classLoader) throws IOException {
-        try (InputStream in = classLoader.getResourceAsStream(LIB_INDEX)) {
+    private static List<String> readResourceLines(ClassLoader classLoader, String resourceName) throws IOException {
+        try (InputStream in = classLoader.getResourceAsStream(resourceName)) {
             if (in == null) {
-                throw new IOException("Missing " + LIB_INDEX + ". Run `mvn package` before launching.");
+                throw new IOException("Missing " + resourceName + ". Run `mvn package` before launching.");
             }
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
                 return reader.lines()
@@ -1369,133 +1370,62 @@ public final class MicronautSourceLauncher {
 
         private static InMemoryClassPath fromLauncherResources(boolean includeTestLibraries) throws IOException {
             ClassLoader classLoader = MicronautSourceLauncher.class.getClassLoader();
+            LauncherLibManifest manifest = LauncherLibManifest.read(classLoader);
+            List<String> selectedResources = manifest.compilerResources(includeTestLibraries);
+            Map<String, List<ClassIndexEntry>> classIndex = readClassIndex(classLoader, Set.copyOf(selectedResources));
+            Map<String, LauncherJarResource> jarResources = selectedResources.stream()
+                    .collect(Collectors.toMap(
+                            resource -> resource,
+                            resource -> new LauncherJarResource(classLoader, resource),
+                            (first, second) -> first,
+                            LinkedHashMap::new
+                    ));
             Map<String, InMemoryClassFile> byBinaryName = new HashMap<>();
             Map<String, List<InMemoryClassFile>> byPackageName = new HashMap<>();
-            for (String resource : readLibIndex(classLoader)) {
-                if (!isJavacClasspathLibrary(resource, includeTestLibraries)) {
-                    continue;
-                }
-                try (InputStream in = classLoader.getResourceAsStream(resource)) {
-                    if (in == null) {
-                        throw new IOException("Missing launcher resource: " + resource);
+            for (String resource : selectedResources) {
+                LauncherJarResource jarResource = jarResources.get(resource);
+                for (ClassIndexEntry entry : classIndex.getOrDefault(resource, List.of())) {
+                    if (!byBinaryName.containsKey(entry.binaryName())) {
+                        InMemoryClassFile file = new InMemoryClassFile(jarResource, entry);
+                        byBinaryName.put(entry.binaryName(), file);
+                        byPackageName.computeIfAbsent(packageName(entry.binaryName()), ignored -> new ArrayList<>()).add(file);
                     }
-                    indexJar(resource, in.readAllBytes(), byBinaryName, byPackageName);
                 }
             }
             return new InMemoryClassPath(Map.copyOf(byBinaryName), copyPackageIndex(byPackageName));
         }
 
-        private static boolean isJavacClasspathLibrary(String resource, boolean includeTestLibraries) {
-            String fileName = resource.substring(resource.lastIndexOf('/') + 1);
-            if (!includeTestLibraries && isTestLibrary(fileName)) {
-                return false;
-            }
-            return !isDependencyResolverLibrary(fileName);
-        }
-
-        private static boolean isTestLibrary(String fileName) {
-            return fileName.startsWith("junit-") ||
-                    fileName.startsWith("apiguardian-api-") ||
-                    fileName.startsWith("opentest4j-") ||
-                    fileName.startsWith("micronaut-test-");
-        }
-
-        private static boolean isDependencyResolverLibrary(String fileName) {
-            return fileName.startsWith("maven-") ||
-                    fileName.startsWith("org.eclipse.sisu.") ||
-                    fileName.startsWith("plexus-") ||
-                    fileName.startsWith("commons-codec-") ||
-                    fileName.startsWith("commons-logging-") ||
-                    fileName.startsWith("httpclient-") ||
-                    fileName.startsWith("httpcore-");
-        }
-
-        private static void indexJar(
-                String resource,
-                byte[] jarBytes,
-                Map<String, InMemoryClassFile> byBinaryName,
-                Map<String, List<InMemoryClassFile>> byPackageName
+        private static Map<String, List<ClassIndexEntry>> readClassIndex(
+                ClassLoader classLoader,
+                Set<String> selectedResources
         ) throws IOException {
-            int eocdOffset = findEndOfCentralDirectory(jarBytes);
-            int entries = getUnsignedShort(jarBytes, eocdOffset + 10);
-            int centralDirectoryOffset = getUnsignedInt(jarBytes, eocdOffset + 16);
-            int offset = centralDirectoryOffset;
-
-            for (int i = 0; i < entries; i++) {
-                if (getUnsignedInt(jarBytes, offset) != 0x02014b50) {
-                    throw new IOException("Bad ZIP central directory in " + resource);
+            Map<String, List<ClassIndexEntry>> byResource = new HashMap<>();
+            for (String line : readResourceLines(classLoader, LIB_CLASS_INDEX)) {
+                int resourceEnd = line.indexOf('\t');
+                if (resourceEnd < 0) {
+                    throw new IOException("Bad " + LIB_CLASS_INDEX + " line: " + line);
                 }
-
-                int flags = getUnsignedShort(jarBytes, offset + 8);
-                int method = getUnsignedShort(jarBytes, offset + 10);
-                int compressedSize = getUnsignedInt(jarBytes, offset + 20);
-                int uncompressedSize = getUnsignedInt(jarBytes, offset + 24);
-                int nameLength = getUnsignedShort(jarBytes, offset + 28);
-                int extraLength = getUnsignedShort(jarBytes, offset + 30);
-                int commentLength = getUnsignedShort(jarBytes, offset + 32);
-                int localHeaderOffset = getUnsignedInt(jarBytes, offset + 42);
-                String entryName = new String(jarBytes, offset + 46, nameLength, StandardCharsets.UTF_8);
-
-                if (isClassEntry(entryName) && !byBinaryName.containsKey(binaryName(entryName))) {
-                    String binaryName = binaryName(entryName);
-                    int dataOffset = localDataOffset(jarBytes, localHeaderOffset);
-                    InMemoryClassFile file = new InMemoryClassFile(
-                            resource,
-                            entryName,
-                            binaryName,
-                            jarBytes,
-                            flags,
-                            method,
-                            dataOffset,
-                            compressedSize,
-                            uncompressedSize
-                    );
-                    byBinaryName.put(binaryName, file);
-                    byPackageName.computeIfAbsent(packageName(binaryName), ignored -> new ArrayList<>()).add(file);
+                String resource = line.substring(0, resourceEnd);
+                if (!selectedResources.contains(resource)) {
+                    continue;
                 }
-
-                offset += 46 + nameLength + extraLength + commentLength;
-            }
-        }
-
-        private static boolean isClassEntry(String entryName) {
-            return entryName.endsWith(".class") &&
-                    !entryName.startsWith("META-INF/versions/") &&
-                    !entryName.endsWith("module-info.class");
-        }
-
-        private static String binaryName(String entryName) {
-            return entryName.substring(0, entryName.length() - ".class".length()).replace('/', '.');
-        }
-
-        private static int localDataOffset(byte[] jarBytes, int localHeaderOffset) throws IOException {
-            if (getUnsignedInt(jarBytes, localHeaderOffset) != 0x04034b50) {
-                throw new IOException("Bad ZIP local header");
-            }
-            int nameLength = getUnsignedShort(jarBytes, localHeaderOffset + 26);
-            int extraLength = getUnsignedShort(jarBytes, localHeaderOffset + 28);
-            return localHeaderOffset + 30 + nameLength + extraLength;
-        }
-
-        private static int findEndOfCentralDirectory(byte[] jarBytes) throws IOException {
-            int minOffset = Math.max(0, jarBytes.length - 65_557);
-            for (int offset = jarBytes.length - 22; offset >= minOffset; offset--) {
-                if (getUnsignedInt(jarBytes, offset) == 0x06054b50) {
-                    return offset;
+                String[] parts = line.split("\t", -1);
+                if (parts.length != 8) {
+                    throw new IOException("Bad " + LIB_CLASS_INDEX + " line: " + line);
                 }
+                ClassIndexEntry entry = new ClassIndexEntry(
+                        resource,
+                        parts[1],
+                        parts[2],
+                        Integer.parseInt(parts[3]),
+                        Integer.parseInt(parts[4]),
+                        Integer.parseInt(parts[5]),
+                        Integer.parseInt(parts[6]),
+                        Integer.parseInt(parts[7])
+                );
+                byResource.computeIfAbsent(resource, ignored -> new ArrayList<>()).add(entry);
             }
-            throw new IOException("Missing ZIP end of central directory");
-        }
-
-        private static int getUnsignedShort(byte[] bytes, int offset) {
-            return (bytes[offset] & 0xff) | ((bytes[offset + 1] & 0xff) << 8);
-        }
-
-        private static int getUnsignedInt(byte[] bytes, int offset) {
-            return (bytes[offset] & 0xff) |
-                    ((bytes[offset + 1] & 0xff) << 8) |
-                    ((bytes[offset + 2] & 0xff) << 16) |
-                    ((bytes[offset + 3] & 0xff) << 24);
+            return Map.copyOf(byResource);
         }
 
         private static Map<String, List<InMemoryClassFile>> copyPackageIndex(Map<String, List<InMemoryClassFile>> byPackageName) {
@@ -1526,6 +1456,73 @@ public final class MicronautSourceLauncher {
         private static String packageName(String binaryName) {
             int lastDot = binaryName.lastIndexOf('.');
             return lastDot < 0 ? "" : binaryName.substring(0, lastDot);
+        }
+    }
+
+    private record LauncherLibManifest(List<LauncherLibrary> libraries) {
+        private static LauncherLibManifest read(ClassLoader classLoader) throws IOException {
+            List<LauncherLibrary> libraries = new ArrayList<>();
+            for (String line : readResourceLines(classLoader, LIB_MANIFEST)) {
+                String[] parts = line.split("\t", -1);
+                if (parts.length != 2) {
+                    throw new IOException("Bad " + LIB_MANIFEST + " line: " + line);
+                }
+                libraries.add(new LauncherLibrary(parts[0], parts[1]));
+            }
+            return new LauncherLibManifest(List.copyOf(libraries));
+        }
+
+        private List<String> compilerResources(boolean includeTestLibraries) {
+            List<String> resources = new ArrayList<>();
+            for (LauncherLibrary library : libraries) {
+                if ("compiler-main".equals(library.role()) ||
+                        (includeTestLibraries && "compiler-test".equals(library.role()))) {
+                    resources.add(library.resource());
+                }
+            }
+            return List.copyOf(resources);
+        }
+    }
+
+    private record LauncherLibrary(String role, String resource) {
+    }
+
+    private record ClassIndexEntry(
+            String resource,
+            String binaryName,
+            String entryName,
+            int flags,
+            int method,
+            int dataOffset,
+            int compressedSize,
+            int uncompressedSize
+    ) {
+    }
+
+    private static final class LauncherJarResource {
+        private final ClassLoader classLoader;
+        private final String resource;
+        private byte[] bytes;
+
+        private LauncherJarResource(ClassLoader classLoader, String resource) {
+            this.classLoader = classLoader;
+            this.resource = resource;
+        }
+
+        private String resource() {
+            return resource;
+        }
+
+        private synchronized byte[] bytes() throws IOException {
+            if (bytes == null) {
+                try (InputStream in = classLoader.getResourceAsStream(resource)) {
+                    if (in == null) {
+                        throw new IOException("Missing launcher resource: " + resource);
+                    }
+                    bytes = in.readAllBytes();
+                }
+            }
+            return bytes;
         }
     }
 
@@ -1804,10 +1801,9 @@ public final class MicronautSourceLauncher {
     }
 
     private static final class InMemoryClassFile extends SimpleJavaFileObject {
-        private final String resource;
+        private final LauncherJarResource jarResource;
         private final String entryName;
         private final String binaryName;
-        private final byte[] jarBytes;
         private final int flags;
         private final int method;
         private final int dataOffset;
@@ -1815,27 +1811,16 @@ public final class MicronautSourceLauncher {
         private final int uncompressedSize;
         private byte[] bytes;
 
-        private InMemoryClassFile(
-                String resource,
-                String entryName,
-                String binaryName,
-                byte[] jarBytes,
-                int flags,
-                int method,
-                int dataOffset,
-                int compressedSize,
-                int uncompressedSize
-        ) {
-            super(URI.create("mem:///" + entryName), JavaFileObject.Kind.CLASS);
-            this.resource = resource;
-            this.entryName = entryName;
-            this.binaryName = binaryName;
-            this.jarBytes = jarBytes;
-            this.flags = flags;
-            this.method = method;
-            this.dataOffset = dataOffset;
-            this.compressedSize = compressedSize;
-            this.uncompressedSize = uncompressedSize;
+        private InMemoryClassFile(LauncherJarResource jarResource, ClassIndexEntry entry) {
+            super(URI.create("mem:///" + entry.entryName()), JavaFileObject.Kind.CLASS);
+            this.jarResource = jarResource;
+            this.entryName = entry.entryName();
+            this.binaryName = entry.binaryName();
+            this.flags = entry.flags();
+            this.method = entry.method();
+            this.dataOffset = entry.dataOffset();
+            this.compressedSize = entry.compressedSize();
+            this.uncompressedSize = entry.uncompressedSize();
         }
 
         private String binaryName() {
@@ -1849,16 +1834,17 @@ public final class MicronautSourceLauncher {
 
         private byte[] bytes() throws IOException {
             if (bytes == null) {
+                byte[] jarBytes = jarResource.bytes();
                 bytes = switch (method) {
                     case 0 -> Arrays.copyOfRange(jarBytes, dataOffset, dataOffset + compressedSize);
-                    case 8 -> inflate();
+                    case 8 -> inflate(jarBytes);
                     default -> throw new IOException("Unsupported ZIP method " + method + " for " + getName());
                 };
             }
             return bytes;
         }
 
-        private byte[] inflate() throws IOException {
+        private byte[] inflate(byte[] jarBytes) throws IOException {
             if ((flags & 1) != 0) {
                 throw new IOException("Encrypted ZIP entry is unsupported: " + getName());
             }
@@ -1873,7 +1859,7 @@ public final class MicronautSourceLauncher {
 
         @Override
         public String getName() {
-            return resource + "(" + entryName + ")";
+            return jarResource.resource() + "(" + entryName + ")";
         }
     }
 

@@ -202,7 +202,7 @@
                 <version>${exec.maven.plugin.version}</version>
                 <executions>
                     <execution>
-                        <id>write-launcher-lib-index</id>
+                        <id>write-launcher-lib-metadata</id>
                         <phase>process-resources</phase>
                         <goals>
                             <goal>exec</goal>
@@ -211,9 +211,11 @@
                             <executable>sh</executable>
                             <arguments>
                                 <argument>-c</argument>
-                                <argument>cd "$1/launcher-libs" &amp;&amp; find . -name '*.jar' | sed 's#^\./#launcher-libs/#' | sort &gt; "$1/launcher-libs.index"</argument>
+                                <argument>mkdir -p "$2" &amp;&amp; javac -d "$2" "$3" &amp;&amp; java -cp "$2" demo.build.LauncherLibIndexGenerator "$1"</argument>
                                 <argument>sh</argument>
                                 <argument>${project.build.outputDirectory}</argument>
+                                <argument>${project.build.directory}/build-tools</argument>
+                                <argument>${project.basedir}/src/build/java/demo/build/LauncherLibIndexGenerator.java</argument>
                             </arguments>
                         </configuration>
                     </execution>
@@ -239,7 +241,7 @@
                         <buildArg>-H:+SharedArenaSupport</buildArg>
                         <buildArg>--enable-url-protocols=jar</buildArg>
                         <buildArg>-H:Preserve=module=java.base,package=java.*,package=jdk.internal.*,package=sun.*,module=java.sql,package=java.sql,package=java.sql.*,package=javax.sql,module=jdk.compiler,module=java.compiler,package=io.micronaut.*,package=jakarta.annotation,package=jakarta.annotation.*,package=jakarta.inject,package=jakarta.inject.*,package=jakarta.validation,package=jakarta.validation.*,package=org.junit.*,package=org.opentest4j.*,package=org.apiguardian.*,package=org.objectweb.asm,package=org.objectweb.asm.*,package=com.github.javaparser,package=com.github.javaparser.*,package=org.apache.maven.*,package=org.eclipse.aether.*,package=org.codehaus.plexus.*</buildArg>
-                        <buildArg>-H:IncludeResources=launcher-libs/.*\.jar|launcher-libs.index</buildArg>
+                        <buildArg>-H:IncludeResources=launcher-libs/.*\.jar|launcher-libs.index|launcher-libs.manifest|launcher-libs.classes|org/apache/maven/model/pom-4\.0\.0\.xml</buildArg>
                         <buildArg>--initialize-at-run-time=io.micronaut</buildArg>
                         <buildArg>--initialize-at-run-time=jdk.internal.org.jline.terminal.impl.ffm</buildArg>
                         <buildArg>--initialize-at-build-time=io.micronaut.annotation.processing,io.micronaut.inject.annotation,io.micronaut.inject.beans,io.micronaut.inject.beans.visitor,io.micronaut.inject.processing,io.micronaut.inject.validation,io.micronaut.inject.writer,io.micronaut.inject.provider,io.micronaut.validation.transformer,io.micronaut.validation.transformer.ValidationAnnotationRemapper,io.micronaut.validation.validator,io.micronaut.validation.validator.DefaultAnnotatedElementValidator,io.micronaut.validation.validator.constraints,io.micronaut.validation.validator.constraints.ConstraintValidator,io.micronaut.validation.validator.messages,io.micronaut.validation.validator.messages.DefaultMessages,io.micronaut.validation.visitor,io.micronaut.data.annotation,io.micronaut.data.model,io.micronaut.data.processor,io.micronaut.data.processor.mappers,io.micronaut.data.processor.visitors,jakarta.validation.ConstraintValidator,io.micronaut.core.beans,io.micronaut.core.beans.DefaultBeanIntrospector,io.micronaut.core.io,io.micronaut.core.optim,io.micronaut.core.util,io.micronaut.core.bind,io.micronaut.core.convert,io.micronaut.core.convert.ConversionContext,io.micronaut.core.convert.ImmutableArgumentConversionContext,io.micronaut.core.type,io.micronaut.core.annotation,io.micronaut.core.annotation.AnnotationValue,io.micronaut.core.annotation.AnnotationValueResolver,io.micronaut.core.reflect.ReflectionUtils,io.micronaut.core.async,io.micronaut.core.async.annotation,io.micronaut.http.util,io.micronaut.sourcegen,io.micronaut.aop.mapper,io.micronaut.context.AbstractMessageSource,io.micronaut.context.AbstractMessageSource$MessageKey,io.micronaut.context.ExecutionHandleLocator,io.micronaut.context.ExecutionHandleLocator$1,io.micronaut.context.MessageSource,io.micronaut.context.MessageSource$1,io.micronaut.context.StaticMessageSource,io.micronaut.context.visitor,com.sun.tools.javac.api.JavacTool,org.objectweb.asm,org.slf4j.helpers.NOPLogger,org.slf4j.simple,org.slf4j.simple.SimpleLogger</buildArg>
